@@ -1,8 +1,15 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/DigitalSignature.Abstractions/DigitalSignature.Abstractions.csproj" />
+    <Project Path="src/DigitalSignature.CAdES/DigitalSignature.CAdES.csproj" />
+    <Project Path="src/DigitalSignature.Core/DigitalSignature.Core.csproj" />
+    <Project Path="src/DigitalSignature.Validation/DigitalSignature.Validation.csproj" />
     <Project Path="src/DigitalSignature/DigitalSignature.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/DigitalSignature.CAdES.Tests/DigitalSignature.CAdES.Tests.csproj" />
+    <Project Path="tests/DigitalSignature.Core.Tests/DigitalSignature.Core.Tests.csproj" />
     <Project Path="tests/DigitalSignature.Tests/DigitalSignature.Tests.csproj" />
+    <Project Path="tests/DigitalSignature.Validation.Tests/DigitalSignature.Validation.Tests.csproj" />
   </Folder>
 </Solution>
