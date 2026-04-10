@@ -38,7 +38,7 @@ public sealed class CAdESBaselineBService
         var digestOid = GetDigestOid(suite.HashAlgorithm);
         var digest = HashData(content, suite.HashAlgorithm);
         var signedAttributes = BuildSignedAttributes(digest, digestOid, signingTime ?? DateTimeOffset.UtcNow);
-        var signatureValue = SignSignedAttributes(signedAttributes, privateKey, suite);
+        var signatureValue = SignSignedAttributes(GetSignedAttributesValue(signedAttributes), privateKey, suite);
         var signature = BuildSignedData(signingCertificate, digestOid, signedAttributes, signatureValue, suite, detached: true);
 
         return new SignatureArtifact(
@@ -102,8 +102,8 @@ public sealed class CAdESBaselineBService
         }
 
         var verified = parsed.UsePss
-            ? rsa.VerifyData(parsed.SignedAttributes, parsed.SignatureValue, parsed.HashAlgorithmName, RSASignaturePadding.Pss)
-            : rsa.VerifyData(parsed.SignedAttributes, parsed.SignatureValue, parsed.HashAlgorithmName, RSASignaturePadding.Pkcs1);
+            ? rsa.VerifyData(GetSignedAttributesValue(parsed.SignedAttributes), parsed.SignatureValue, parsed.HashAlgorithmName, RSASignaturePadding.Pss)
+            : rsa.VerifyData(GetSignedAttributesValue(parsed.SignedAttributes), parsed.SignatureValue, parsed.HashAlgorithmName, RSASignaturePadding.Pkcs1);
 
         if (!verified)
         {
@@ -238,6 +238,28 @@ public sealed class CAdESBaselineBService
         parent.WriteEncodedValue(valueWriter.Encode());
         parent.PopSetOf();
         parent.PopSequence();
+    }
+
+    private static byte[] GetSignedAttributesValue(byte[] contextSpecificSignedAttributes)
+    {
+        var reader = new AsnReader(contextSpecificSignedAttributes, AsnEncodingRules.DER);
+        var setReader = reader.ReadSetOf(new Asn1Tag(TagClass.ContextSpecific, 0, isConstructed: true));
+        var elements = new List<byte[]>();
+
+        while (setReader.HasData)
+        {
+            elements.Add(setReader.ReadEncodedValue().ToArray());
+        }
+
+        var writer = new AsnWriter(AsnEncodingRules.DER);
+        writer.PushSetOf();
+        foreach (var element in elements)
+        {
+            writer.WriteEncodedValue(element);
+        }
+
+        writer.PopSetOf();
+        return writer.Encode();
     }
 
     private static byte[] SignSignedAttributes(byte[] signedAttributes, RSA privateKey, SignatureSuite suite)
