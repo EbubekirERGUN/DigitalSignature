@@ -38,7 +38,7 @@ public sealed class CAdESBaselineBService
         var digestOid = GetDigestOid(suite.HashAlgorithm);
         var digest = HashData(content, suite.HashAlgorithm);
         var signedAttributes = BuildSignedAttributes(digest, digestOid, signingTime ?? DateTimeOffset.UtcNow);
-        var signatureValue = SignSignedAttributes(GetSignedAttributesValue(signedAttributes), privateKey, suite);
+        var signatureValue = SignSignedAttributes(signedAttributes, privateKey, suite);
         var signature = BuildSignedData(signingCertificate, digestOid, signedAttributes, signatureValue, suite, detached: true);
 
         return new SignatureArtifact(
@@ -102,8 +102,8 @@ public sealed class CAdESBaselineBService
         }
 
         var verified = parsed.UsePss
-            ? rsa.VerifyData(GetSignedAttributesValue(parsed.SignedAttributes), parsed.SignatureValue, parsed.HashAlgorithmName, RSASignaturePadding.Pss)
-            : rsa.VerifyData(GetSignedAttributesValue(parsed.SignedAttributes), parsed.SignatureValue, parsed.HashAlgorithmName, RSASignaturePadding.Pkcs1);
+            ? rsa.VerifyData(parsed.SignedAttributes, parsed.SignatureValue, parsed.HashAlgorithmName, RSASignaturePadding.Pss)
+            : rsa.VerifyData(parsed.SignedAttributes, parsed.SignatureValue, parsed.HashAlgorithmName, RSASignaturePadding.Pkcs1);
 
         if (!verified)
         {
@@ -240,28 +240,6 @@ public sealed class CAdESBaselineBService
         parent.PopSequence();
     }
 
-    private static byte[] GetSignedAttributesValue(byte[] contextSpecificSignedAttributes)
-    {
-        var reader = new AsnReader(contextSpecificSignedAttributes, AsnEncodingRules.DER);
-        var setReader = reader.ReadSetOf(new Asn1Tag(TagClass.ContextSpecific, 0, isConstructed: true));
-        var elements = new List<byte[]>();
-
-        while (setReader.HasData)
-        {
-            elements.Add(setReader.ReadEncodedValue().ToArray());
-        }
-
-        var writer = new AsnWriter(AsnEncodingRules.DER);
-        writer.PushSetOf();
-        foreach (var element in elements)
-        {
-            writer.WriteEncodedValue(element);
-        }
-
-        writer.PopSetOf();
-        return writer.Encode();
-    }
-
     private static byte[] SignSignedAttributes(byte[] signedAttributes, RSA privateKey, SignatureSuite suite)
     {
         var hashAlgorithmName = ToHashAlgorithmName(suite.HashAlgorithm);
@@ -308,7 +286,7 @@ public sealed class CAdESBaselineBService
     {
         try
         {
-            var reader = new AsnReader(signature, AsnEncodingRules.DER);
+            var reader = new AsnReader(signature.ToArray(), AsnEncodingRules.DER);
             var contentInfo = reader.ReadSequence();
             var contentType = contentInfo.ReadObjectIdentifier();
             if (contentType != "1.2.840.113549.1.7.2")
@@ -331,7 +309,8 @@ public sealed class CAdESBaselineBService
             signedDataReader.ReadSequence();
 
             var certificateSet = signedDataReader.ReadSetOf(new Asn1Tag(TagClass.ContextSpecific, 0, isConstructed: true));
-            var certificate = new X509Certificate2(certificateSet.PeekEncodedValue().ToArray());
+            var certificateBytes = certificateSet.PeekEncodedValue().ToArray();
+            var certificate = X509CertificateLoader.LoadCertificate(certificateBytes);
             certificateSet.ReadEncodedValue();
 
             var signerInfos = signedDataReader.ReadSetOf();
@@ -351,7 +330,7 @@ public sealed class CAdESBaselineBService
                 throw new CryptographicException("SignerInfo digest algorithm does not match SignedData digest algorithm.");
             }
 
-            var signedAttributes = signerInfo.ReadEncodedValue(new Asn1Tag(TagClass.ContextSpecific, 0, isConstructed: true)).ToArray();
+            var signedAttributes = signerInfo.ReadEncodedValue().ToArray();
 
             var signatureAlgorithm = signerInfo.ReadSequence();
             var signatureOid = signatureAlgorithm.ReadObjectIdentifier();
@@ -363,7 +342,7 @@ public sealed class CAdESBaselineBService
             var signatureValue = signerInfo.ReadOctetString();
 
             var attrsReader = new AsnReader(signedAttributes, AsnEncodingRules.DER);
-            var attrSet = attrsReader.ReadSetOf(new Asn1Tag(TagClass.ContextSpecific, 0, isConstructed: true));
+            var attrSet = attrsReader.ReadSetOf();
 
             byte[]? messageDigest = null;
             DateTimeOffset? signingTime = null;
@@ -385,7 +364,10 @@ public sealed class CAdESBaselineBService
                             : values.ReadGeneralizedTime();
                         break;
                     default:
-                        values.ReadEncodedValue();
+                        while (values.HasData)
+                        {
+                            values.ReadEncodedValue();
+                        }
                         break;
                 }
             }
