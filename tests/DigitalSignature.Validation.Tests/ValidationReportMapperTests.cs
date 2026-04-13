@@ -26,7 +26,8 @@ public class ValidationReportMapperTests
         var result = ValidationResult.Success(signature);
         var report = ValidationReportMapper.Map(result);
 
-        Assert.Equal("Valid", report.Conclusion);
+        Assert.Equal("TOTAL_PASSED", report.Conclusion.Indicator);
+        Assert.True(report.Conclusion.IsSuccess);
         Assert.NotNull(report.Signature);
         Assert.Equal("CAdES", report.Signature!.Format);
         Assert.Equal(1, report.Evidence.CertificateCount);
@@ -46,7 +47,8 @@ public class ValidationReportMapperTests
 
         var report = ValidationReportMapper.Map(result);
 
-        Assert.Equal("Invalid", report.Conclusion);
+        Assert.Equal("TOTAL_FAILED", report.Conclusion.Indicator);
+        Assert.False(report.Conclusion.IsSuccess);
         Assert.Single(report.Failures);
         Assert.Equal(ValidationErrorCodes.TrustAnchorMissing, report.Failures[0].Code);
         Assert.Contains("Validation failed", report.Summary);

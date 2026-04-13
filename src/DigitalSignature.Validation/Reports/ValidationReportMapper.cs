@@ -13,7 +13,7 @@ public static class ValidationReportMapper
 
         return new ValidationReport(
             profile,
-            result.Conclusion.ToString(),
+            MapConclusion(result),
             result.EvaluatedAt,
             signature is null ? null : new ValidationReportSignature(
                 signature.Format.ToString(),
@@ -36,5 +36,15 @@ public static class ValidationReportMapper
                 material.SigningCertificate is not null,
                 material.CertificateChain.Count > 0 || material.RevocationInfo.Count > 0 || material.Timestamps.Count > 0),
             ValidationReportSummaryBuilder.Build(result));
+    }
+
+    private static ValidationReportConclusion MapConclusion(ValidationResult result)
+    {
+        return result.Conclusion switch
+        {
+            ValidationConclusion.Valid => new ValidationReportConclusion("TOTAL_PASSED", true),
+            ValidationConclusion.Invalid => new ValidationReportConclusion("TOTAL_FAILED", false, result.Failures.FirstOrDefault()?.Code),
+            _ => new ValidationReportConclusion("INDETERMINATE", false)
+        };
     }
 }

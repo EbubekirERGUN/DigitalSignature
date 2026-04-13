@@ -4,7 +4,7 @@ namespace DigitalSignature.Validation.Reports;
 
 public sealed record ValidationReport(
     string Profile,
-    string Conclusion,
+    ValidationReportConclusion Conclusion,
     DateTimeOffset ProducedAt,
     ValidationReportSignature? Signature,
     IReadOnlyList<ValidationReportFailure> Failures,
