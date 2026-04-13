@@ -36,23 +36,37 @@ public sealed class CAdESBaselineBService
             throw new NotSupportedException("Only RSA signature suites are supported for CAdES Baseline-B in the current implementation.");
         }
 
-        var contentInfo = new ContentInfo(request.Payload.ToArray());
-        var signedCms = new SignedCms(contentInfo, detached: true);
-        var signerCertificate = signingCertificate.HasPrivateKey ? signingCertificate : signingCertificate.CopyWithPrivateKey(privateKey);
-        var signer = new CmsSigner(SubjectIdentifierType.IssuerAndSerialNumber, signerCertificate)
+        return CreateSignature(request, signingCertificate, privateKey, suite, detached: true);
+    }
+
+    public SignatureArtifact CreateAttachedSignature(
+        SignatureRequest request,
+        X509Certificate2 signingCertificate,
+        RSA privateKey,
+        SignatureSuite suite,
+        DateTimeOffset? signingTime = null)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(signingCertificate);
+        ArgumentNullException.ThrowIfNull(privateKey);
+        ArgumentNullException.ThrowIfNull(suite);
+
+        if (request.Format != SignatureFormat.CAdES)
         {
-            IncludeOption = X509IncludeOption.EndCertOnly,
-            DigestAlgorithm = new Oid(GetDigestOid(suite.HashAlgorithm))
-        };
+            throw new ArgumentException("CAdES service only accepts CAdES requests.", nameof(request));
+        }
 
-        signer.SignedAttributes.Add(CreateSigningCertificateV2Attribute(signingCertificate, suite.HashAlgorithm));
+        if (request.Level != SignatureLevel.BaselineB)
+        {
+            throw new ArgumentException("CAdES Baseline-B signing requires SignatureLevel.BaselineB.", nameof(request));
+        }
 
-        signedCms.ComputeSignature(signer, silent: true);
-        return new SignatureArtifact(
-            SignatureFormat.CAdES,
-            SignatureLevel.BaselineB,
-            signedCms.Encode(),
-            "application/pkcs7-signature");
+        if (!suite.IsRsa)
+        {
+            throw new NotSupportedException("Only RSA signature suites are supported for CAdES Baseline-B in the current implementation.");
+        }
+
+        return CreateSignature(request, signingCertificate, privateKey, suite, detached: false);
     }
 
     public SignatureDescriptor ReadSignature(ReadOnlyMemory<byte> signature)
@@ -101,6 +115,59 @@ public sealed class CAdESBaselineBService
         }
 
         return ValidationResult.Success(ReadSignature(signature));
+    }
+
+    public ValidationResult VerifyAttachedSignature(ReadOnlyMemory<byte> signature)
+    {
+        try
+        {
+            var signedCms = Decode(signature);
+            signedCms.CheckSignature(verifySignatureOnly: true);
+
+            if (signedCms.SignerInfos.Count == 0)
+            {
+                return ValidationResult.Failure(new ValidationFailure(
+                    ValidationFailureKind.MalformedSignature,
+                    ValidationErrorCodes.MalformedSignature,
+                    "CMS/CAdES signature does not contain a SignerInfo."));
+            }
+
+            return ValidationResult.Success(ReadSignature(signature));
+        }
+        catch (CryptographicException ex)
+        {
+            return ValidationResult.Failure(new ValidationFailure(
+                ValidationFailureKind.MalformedSignature,
+                ValidationErrorCodes.MalformedSignature,
+                ex.Message));
+        }
+    }
+
+    private static SignatureArtifact CreateSignature(
+        SignatureRequest request,
+        X509Certificate2 signingCertificate,
+        RSA privateKey,
+        SignatureSuite suite,
+        bool detached)
+    {
+        var contentInfo = new ContentInfo(request.Payload.ToArray());
+        var signedCms = new SignedCms(contentInfo, detached);
+        var signerCertificate = signingCertificate.HasPrivateKey ? signingCertificate : signingCertificate.CopyWithPrivateKey(privateKey);
+        var signer = new CmsSigner(SubjectIdentifierType.IssuerAndSerialNumber, signerCertificate)
+        {
+            IncludeOption = X509IncludeOption.EndCertOnly,
+            DigestAlgorithm = new Oid(GetDigestOid(suite.HashAlgorithm))
+        };
+
+        signer.SignedAttributes.Add(new Pkcs9SigningTime(DateTime.UtcNow));
+        signer.SignedAttributes.Add(CreateSigningCertificateV2Attribute(signingCertificate, suite.HashAlgorithm));
+
+        signedCms.ComputeSignature(signer, silent: true);
+        return new SignatureArtifact(
+            SignatureFormat.CAdES,
+            SignatureLevel.BaselineB,
+            signedCms.Encode(),
+            detached ? "application/pkcs7-signature" : "application/pkcs7-mime");
     }
 
     private static SignedCms Decode(ReadOnlyMemory<byte> signature)

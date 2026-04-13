@@ -24,6 +24,20 @@ public class RuntimeSmokeTests
     }
 
     [Fact]
+    public void CAdES_RuntimeSmoke_ShouldCreateAndVerifyAttachedSignature()
+    {
+        using var material = new RuntimeMaterial();
+        var service = new CAdESBaselineBService();
+        var request = new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, RuntimeSmokeFixtures.CadesPayload);
+
+        var artifact = service.CreateAttachedSignature(request, material.Certificate, material.Key, material.Suite);
+        var verification = service.VerifyAttachedSignature(artifact.Data);
+
+        Assert.Equal(ValidationConclusion.Valid, verification.Conclusion);
+        Assert.NotEmpty(artifact.Data.ToArray());
+    }
+
+    [Fact]
     public void XAdES_RuntimeSmoke_ShouldCreateAndVerifyEnvelopedSignature()
     {
         using var material = new RuntimeMaterial();
