@@ -15,4 +15,6 @@ public static class ValidationErrorCodes
     public const string MalformedSignature = "validation.malformed_signature";
     public const string CanonicalizationInvalid = "validation.canonicalization_invalid";
     public const string ReferenceResolutionFailed = "validation.reference_resolution_failed";
+    public const string JsonCanonicalizationInvalid = "validation.json_canonicalization_invalid";
+    public const string JwsMalformed = "validation.jws_malformed";
 }

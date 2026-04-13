@@ -3,6 +3,7 @@
     <Project Path="src/DigitalSignature.Abstractions/DigitalSignature.Abstractions.csproj" />
     <Project Path="src/DigitalSignature.CAdES/DigitalSignature.CAdES.csproj" />
     <Project Path="src/DigitalSignature.Core/DigitalSignature.Core.csproj" />
+    <Project Path="src/DigitalSignature.JAdES/DigitalSignature.JAdES.csproj" />
     <Project Path="src/DigitalSignature.PAdES/DigitalSignature.PAdES.csproj" />
     <Project Path="src/DigitalSignature.Validation/DigitalSignature.Validation.csproj" />
     <Project Path="src/DigitalSignature.XAdES/DigitalSignature.XAdES.csproj" />
@@ -11,6 +12,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/DigitalSignature.CAdES.Tests/DigitalSignature.CAdES.Tests.csproj" />
     <Project Path="tests/DigitalSignature.Core.Tests/DigitalSignature.Core.Tests.csproj" />
+    <Project Path="tests/DigitalSignature.JAdES.Tests/DigitalSignature.JAdES.Tests.csproj" />
     <Project Path="tests/DigitalSignature.PAdES.Tests/DigitalSignature.PAdES.Tests.csproj" />
     <Project Path="tests/DigitalSignature.Tests/DigitalSignature.Tests.csproj" />
     <Project Path="tests/DigitalSignature.Validation.Tests/DigitalSignature.Validation.Tests.csproj" />
