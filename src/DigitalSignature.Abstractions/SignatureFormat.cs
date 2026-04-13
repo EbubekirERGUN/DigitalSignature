@@ -7,4 +7,5 @@ public enum SignatureFormat
     XAdES = 2,
     PAdES = 3,
     JAdES = 4,
+    ASiC = 5,
 }
