@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\DigitalSignature.Core\DigitalSignature.Core.csproj" />
+    <ProjectReference Include="..\..\src\DigitalSignature.CAdES\DigitalSignature.CAdES.csproj" />
     <ProjectReference Include="..\..\src\DigitalSignature.Abstractions\DigitalSignature.Abstractions.csproj" />
   </ItemGroup>
 
