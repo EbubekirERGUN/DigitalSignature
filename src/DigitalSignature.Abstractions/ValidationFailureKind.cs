@@ -14,6 +14,8 @@ public enum ValidationFailureKind
     UnsupportedFormat = 9,
     UnsupportedAlgorithm = 10,
     MalformedSignature = 11,
-    JsonCanonicalizationInvalid = 12,
-    JwsMalformed = 13,
+    CanonicalizationInvalid = 12,
+    ReferenceResolutionFailed = 13,
+    JsonCanonicalizationInvalid = 14,
+    JwsMalformed = 15,
 }
