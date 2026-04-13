@@ -14,6 +14,7 @@
     <Project Path="tests/DigitalSignature.Core.Tests/DigitalSignature.Core.Tests.csproj" />
     <Project Path="tests/DigitalSignature.JAdES.Tests/DigitalSignature.JAdES.Tests.csproj" />
     <Project Path="tests/DigitalSignature.PAdES.Tests/DigitalSignature.PAdES.Tests.csproj" />
+    <Project Path="tests/DigitalSignature.RuntimeTests/DigitalSignature.RuntimeTests.csproj" />
     <Project Path="tests/DigitalSignature.Tests/DigitalSignature.Tests.csproj" />
     <Project Path="tests/DigitalSignature.Validation.Tests/DigitalSignature.Validation.Tests.csproj" />
     <Project Path="tests/DigitalSignature.XAdES.Tests/DigitalSignature.XAdES.Tests.csproj" />
