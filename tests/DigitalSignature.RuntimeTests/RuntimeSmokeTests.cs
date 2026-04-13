@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Security.Cryptography.Pkcs;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using DigitalSignature.Abstractions;
 using DigitalSignature.ASiC;
@@ -42,17 +45,26 @@ public class RuntimeSmokeTests
     }
 
     [Fact]
-    public void CAdES_RuntimeSmoke_ShouldCreateAndVerifyAttachedSignature()
+    public async Task CAdES_RuntimeSmoke_ShouldCreateAndVerifyAttachedBaselineTSignature()
     {
         using var material = new RuntimeMaterial();
         var service = new CAdESBaselineBService();
-        var request = new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, RuntimeSmokeFixtures.CadesPayload);
+        var baselineBRequest = new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, RuntimeSmokeFixtures.CadesPayload);
 
-        var artifact = service.CreateAttachedSignature(request, material.Certificate, material.Key, material.Suite);
-        var verification = service.VerifyAttachedSignature(artifact.Data);
+        var baselineBArtifact = service.CreateAttachedSignature(baselineBRequest, material.Certificate, material.Key, material.Suite);
+        var timestampMaterial = await CreateTimestampForAttachedSignatureAsync(baselineBArtifact.Data, material.TimestampProvider);
+        var baselineTArtifact = service.CreateAttachedSignature(
+            baselineBRequest with { Level = SignatureLevel.BaselineT },
+            material.Certificate,
+            material.Key,
+            material.Suite,
+            signatureTimestamp: timestampMaterial);
+        var verification = service.VerifyAttachedSignature(baselineTArtifact.Data);
+        var descriptor = service.ReadSignature(baselineTArtifact.Data);
 
         Assert.Equal(ValidationConclusion.Valid, verification.Conclusion);
-        Assert.NotEmpty(artifact.Data.ToArray());
+        Assert.Equal(SignatureLevel.BaselineT, descriptor.Level);
+        Assert.Single(descriptor.ValidationMaterial.Timestamps);
     }
 
     [Fact]
@@ -113,22 +125,58 @@ public class RuntimeSmokeTests
         Assert.True(verification.HasDetachedCAdESSignature);
     }
 
+    private static async Task<TimestampMaterial> CreateTimestampForAttachedSignatureAsync(
+        ReadOnlyMemory<byte> signature,
+        ITimestampProvider timestampProvider)
+    {
+        var signedCms = new SignedCms();
+        signedCms.Decode(signature.ToArray());
+        var timestampRequest = Rfc3161TimestampRequest.CreateFromSignerInfo(
+            signedCms.SignerInfos[0],
+            HashAlgorithmName.SHA256,
+            null,
+            null,
+            true,
+            null);
+
+        var response = await timestampProvider.GetTimestampAsync(
+            new TimestampRequest(
+                timestampRequest.GetMessageHash(),
+                timestampRequest.HashAlgorithmId.Value!,
+                timestampRequest.RequestedPolicyId?.Value,
+                timestampRequest.GetNonce() is { } nonce ? Convert.ToHexString(nonce.Span) : null,
+                timestampRequest.RequestSignerCertificate));
+
+        Assert.True(response.IsSuccess);
+        Assert.NotNull(response.Timestamp);
+        return response.Timestamp!;
+    }
+
     private sealed class RuntimeMaterial : IDisposable
     {
         public RuntimeMaterial()
         {
             var material = TestCertificateFactory.CreateSelfSignedRsa("CN=Runtime Smoke Test");
+            var tsaMaterial = TestCertificateFactory.CreateSelfSignedRsaTsa("CN=Runtime Smoke TSA");
             Key = material.Key;
             Certificate = material.Certificate;
+            TsaKey = tsaMaterial.Key;
+            TsaCertificate = tsaMaterial.Certificate;
+            TimestampProvider = new LocalRfc3161TimestampProvider(TsaCertificate);
             Suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048, IsRecommended: true);
         }
 
-        public System.Security.Cryptography.RSA Key { get; }
-        public System.Security.Cryptography.X509Certificates.X509Certificate2 Certificate { get; }
+        public RSA Key { get; }
+        public X509Certificate2 Certificate { get; }
+        public RSA TsaKey { get; }
+        public X509Certificate2 TsaCertificate { get; }
+        public ITimestampProvider TimestampProvider { get; }
         public SignatureSuite Suite { get; }
 
         public void Dispose()
         {
+            TsaCertificate.Dispose();
+            TsaKey.Dispose();
             Certificate.Dispose();
             Key.Dispose();
         }

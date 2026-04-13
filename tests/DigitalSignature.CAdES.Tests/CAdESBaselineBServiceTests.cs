@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
 using DigitalSignature.Abstractions;
 using DigitalSignature.CAdES;
@@ -44,6 +45,74 @@ public class CAdESBaselineBServiceTests
         Assert.Equal("2.16.840.1.101.3.4.2.1", descriptor.DigestAlgorithm);
         Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
         Assert.Empty(validation.Failures);
+    }
+
+    [Fact]
+    public async Task CreateDetachedSignature_ShouldProduceCAdESBaselineTArtifact_WhenTimestampIsProvided()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=CAdES Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=CAdES Test TSA");
+
+        var service = new CAdESBaselineBService();
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate, fixedTimestamp: DateTimeOffset.Parse("2026-04-13T18:45:00Z"));
+        var suite = new SignatureSuite(
+            SignatureAlgorithmIdentifier.RsaPkcs1,
+            HashAlgorithmIdentifier.Sha256,
+            2048,
+            IsRecommended: true);
+        var baselineBRequest = new SignatureRequest(
+            SignatureFormat.CAdES,
+            SignatureLevel.BaselineB,
+            "Hello CAdES-T"u8.ToArray(),
+            MimeType: "text/plain",
+            ContentTypeHint: "detached");
+
+        var baselineBArtifact = service.CreateDetachedSignature(baselineBRequest, certificate, rsa, suite);
+        var timestampMaterial = await CreateTimestampForSignatureAsync(baselineBArtifact.Data, baselineBRequest.Payload, timestampProvider);
+
+        var timestampedArtifact = service.CreateDetachedSignature(
+            baselineBRequest with { Level = SignatureLevel.BaselineT },
+            certificate,
+            rsa,
+            suite,
+            signatureTimestamp: timestampMaterial);
+
+        var descriptor = service.ReadSignature(timestampedArtifact.Data);
+        var validation = service.VerifyDetachedSignature(baselineBRequest.Payload, timestampedArtifact.Data);
+
+        Assert.Equal(SignatureLevel.BaselineT, timestampedArtifact.Level);
+        Assert.Equal(SignatureLevel.BaselineT, descriptor.Level);
+        Assert.Single(descriptor.ValidationMaterial.Timestamps);
+        Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
+    }
+
+    [Fact]
+    public async Task VerifyDetachedSignature_ShouldFail_WhenTimestampTokenIsModified()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=CAdES Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=CAdES Test TSA");
+
+        var service = new CAdESBaselineBService();
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate);
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048);
+        var request = new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, "payload"u8.ToArray());
+
+        var baselineBArtifact = service.CreateDetachedSignature(request, certificate, rsa, suite);
+        var timestampMaterial = await CreateTimestampForSignatureAsync(baselineBArtifact.Data, request.Payload, timestampProvider);
+        var baselineTArtifact = service.CreateDetachedSignature(request with { Level = SignatureLevel.BaselineT }, certificate, rsa, suite, signatureTimestamp: timestampMaterial);
+
+        var corrupted = baselineTArtifact.Data.ToArray();
+        corrupted[^32] ^= 0xFF;
+
+        var validation = service.VerifyDetachedSignature(request.Payload, corrupted);
+
+        Assert.Equal(ValidationConclusion.Invalid, validation.Conclusion);
+        Assert.Contains(validation.Failures, failure =>
+            failure.Code is ValidationErrorCodes.TimestampInvalid or ValidationErrorCodes.MalformedSignature);
     }
 
     [Fact]
@@ -97,6 +166,34 @@ public class CAdESBaselineBServiceTests
             failure.Code is ValidationErrorCodes.MalformedSignature or ValidationErrorCodes.SignatureValueInvalid);
     }
 
+    private static async Task<TimestampMaterial> CreateTimestampForSignatureAsync(
+        ReadOnlyMemory<byte> signature,
+        ReadOnlyMemory<byte> payload,
+        ITimestampProvider timestampProvider)
+    {
+        var signedCms = new SignedCms(new ContentInfo(payload.ToArray()), detached: true);
+        signedCms.Decode(signature.ToArray());
+        var timestampRequest = Rfc3161TimestampRequest.CreateFromSignerInfo(
+            signedCms.SignerInfos[0],
+            HashAlgorithmName.SHA256,
+            null,
+            null,
+            true,
+            null);
+
+        var response = await timestampProvider.GetTimestampAsync(
+            new TimestampRequest(
+                timestampRequest.GetMessageHash(),
+                timestampRequest.HashAlgorithmId.Value!,
+                timestampRequest.RequestedPolicyId?.Value,
+                timestampRequest.GetNonce() is { } nonce ? Convert.ToHexString(nonce.Span) : null,
+                timestampRequest.RequestSignerCertificate));
+
+        Assert.True(response.IsSuccess);
+        Assert.NotNull(response.Timestamp);
+        return response.Timestamp!;
+    }
+
     private static X509Certificate2 CreateSelfSignedCertificate(RSA rsa, string subjectName)
     {
         var request = new CertificateRequest(
@@ -115,5 +212,18 @@ public class CAdESBaselineBServiceTests
         return request.CreateSelfSigned(
             DateTimeOffset.UtcNow.AddDays(-1),
             DateTimeOffset.UtcNow.AddYears(1));
+    }
+
+    private static X509Certificate2 CreateTsaCertificate(RSA rsa, string subjectName)
+    {
+        var request = new CertificateRequest(subjectName, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
+        request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.NonRepudiation, true));
+
+        var enhancedKeyUsages = new OidCollection { new("1.3.6.1.5.5.7.3.8") };
+        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(enhancedKeyUsages, true));
+
+        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
     }
 }
