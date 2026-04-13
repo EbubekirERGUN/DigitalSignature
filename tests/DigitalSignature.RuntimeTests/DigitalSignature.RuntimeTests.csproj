@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\DigitalSignature.Abstractions\DigitalSignature.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\DigitalSignature.ASiC\DigitalSignature.ASiC.csproj" />
     <ProjectReference Include="..\..\src\DigitalSignature.CAdES\DigitalSignature.CAdES.csproj" />
     <ProjectReference Include="..\..\src\DigitalSignature.Core\DigitalSignature.Core.csproj" />
     <ProjectReference Include="..\..\src\DigitalSignature.JAdES\DigitalSignature.JAdES.csproj" />

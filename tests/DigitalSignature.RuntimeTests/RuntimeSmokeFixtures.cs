@@ -4,6 +4,7 @@ namespace DigitalSignature.RuntimeTests;
 
 internal static class RuntimeSmokeFixtures
 {
+    public static readonly byte[] AsicPayload = Encoding.UTF8.GetBytes("Runtime ASiC payload");
     public static readonly byte[] CadesPayload = Encoding.UTF8.GetBytes("Runtime CAdES payload");
     public static readonly byte[] JadesPayload = Encoding.UTF8.GetBytes("{\"invoice\":{\"id\":42,\"currency\":\"TRY\"},\"total\":123.45}");
     public static readonly byte[] XadesPayload = Encoding.UTF8.GetBytes("<Invoice Id=\"inv-42\"><Total Currency=\"TRY\">123.45</Total></Invoice>");

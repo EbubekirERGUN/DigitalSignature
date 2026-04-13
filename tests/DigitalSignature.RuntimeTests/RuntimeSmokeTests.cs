@@ -1,4 +1,6 @@
+using System.Text.Json;
 using DigitalSignature.Abstractions;
+using DigitalSignature.ASiC;
 using DigitalSignature.CAdES;
 using DigitalSignature.Core;
 using DigitalSignature.JAdES;
@@ -9,6 +11,22 @@ namespace DigitalSignature.RuntimeTests;
 
 public class RuntimeSmokeTests
 {
+    [Fact]
+    public void ASiC_RuntimeSmoke_ShouldCreateAndVerifyContainer()
+    {
+        using var material = new RuntimeMaterial();
+        var service = new ASiCSBaselineBService();
+        var request = new SignatureRequest(SignatureFormat.ASiC, SignatureLevel.BaselineB, RuntimeSmokeFixtures.AsicPayload);
+
+        var artifact = service.CreateContainer(request, "runtime.txt", material.Certificate, material.Key, material.Suite);
+        var verification = service.VerifyContainer(artifact.Container.Data);
+
+        Assert.Equal(ValidationConclusion.Valid, verification.Validation.Conclusion);
+        Assert.True(verification.IsMimeTypeFileFirst);
+        Assert.True(verification.IsMimeTypeFileStored);
+        Assert.Equal("runtime.txt", verification.PayloadEntryName);
+    }
+
     [Fact]
     public void CAdES_RuntimeSmoke_ShouldCreateAndVerifyDetachedSignature()
     {
@@ -59,10 +77,26 @@ public class RuntimeSmokeTests
         var request = new SignatureRequest(SignatureFormat.JAdES, SignatureLevel.BaselineB, RuntimeSmokeFixtures.JadesPayload);
 
         var envelope = service.CreateDetachedSignature(request, material.Certificate, material.Key, material.Suite);
+        var jsonEnvelope = service.CreateDetachedJsonSignature(request, material.Certificate, material.Key, material.Suite);
         var verification = service.VerifyDetachedSignature(request.Payload, envelope.CompactSerialization, material.Certificate);
+        using var jsonDocument = JsonDocument.Parse(jsonEnvelope.JsonDocument);
+        using var protectedHeader = JsonDocument.Parse(jsonEnvelope.ProtectedHeaderJson);
+        var root = jsonDocument.RootElement;
+        var protectedRoot = protectedHeader.RootElement;
+
+        var signatures = root.GetProperty("signatures");
 
         Assert.Equal(ValidationConclusion.Valid, verification.Conclusion);
         Assert.Contains('.', envelope.CompactSerialization);
+        Assert.Equal(JsonValueKind.String, root.GetProperty("payload").ValueKind);
+        Assert.Equal(JsonValueKind.Array, signatures.ValueKind);
+        Assert.Equal(1, signatures.GetArrayLength());
+        Assert.Equal(JsonValueKind.String, signatures[0].GetProperty("protected").ValueKind);
+        Assert.Equal(JsonValueKind.String, signatures[0].GetProperty("signature").ValueKind);
+        Assert.False(root.TryGetProperty("protected", out _));
+        Assert.False(root.TryGetProperty("signature", out _));
+        Assert.Equal("jose+json", protectedRoot.GetProperty("typ").GetString());
+        Assert.True(protectedRoot.GetProperty("x5c").GetArrayLength() > 0);
     }
 
     [Fact]

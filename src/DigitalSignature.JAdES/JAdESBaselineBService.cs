@@ -1,6 +1,10 @@
+using System.Formats.Asn1;
+using System.Globalization;
+using System.Numerics;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using DigitalSignature.Abstractions;
 using DigitalSignature.Core;
@@ -15,54 +19,30 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
         RSA privateKey,
         SignatureSuite suite,
         DateTimeOffset? signingTime = null)
+        => CreateSignatureEnvelope(request, signingCertificate, privateKey, suite, signingTime, "jose").Envelope;
+
+    public JAdESJsonSignatureEnvelope CreateDetachedJsonSignature(
+        SignatureRequest request,
+        X509Certificate2 signingCertificate,
+        RSA privateKey,
+        SignatureSuite suite,
+        DateTimeOffset? signingTime = null)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentNullException.ThrowIfNull(signingCertificate);
-        ArgumentNullException.ThrowIfNull(privateKey);
-        ArgumentNullException.ThrowIfNull(suite);
+        var serialized = CreateSignatureEnvelope(request, signingCertificate, privateKey, suite, signingTime, "jose+json");
+        var jsonDocument = BuildGeneralJsonSerialization(
+            serialized.Envelope.Payload,
+            serialized.Envelope.ProtectedHeader,
+            serialized.Envelope.Signature);
 
-        if (request.Format != SignatureFormat.JAdES)
-        {
-            throw new ArgumentException("JAdES service only accepts JAdES requests.", nameof(request));
-        }
-
-        if (request.Level != SignatureLevel.BaselineB)
-        {
-            throw new ArgumentException("JAdES Baseline-B signing requires SignatureLevel.BaselineB.", nameof(request));
-        }
-
-        if (!suite.IsRsa)
-        {
-            throw new NotSupportedException("Only RSA signature suites are supported for JAdES Baseline-B in the current implementation.");
-        }
-
-        var canonicalPayload = canonicalizer.Canonicalize(request.Payload);
-        var protectedHeaderJson = JsonSerializer.Serialize(new Dictionary<string, object?>
-        {
-            ["alg"] = GetJwsAlgorithm(suite),
-            ["typ"] = "JOSE+JSON",
-            ["cty"] = "application/json",
-            ["sigT"] = (signingTime ?? DateTimeOffset.UtcNow).UtcDateTime.ToString("O"),
-            ["jades_c14n"] = "RFC8785"
-        });
-
-        var protectedHeader = Base64UrlEncode(Encoding.UTF8.GetBytes(protectedHeaderJson));
-        var payload = Base64UrlEncode(Encoding.UTF8.GetBytes(canonicalPayload));
-        var signingInput = Encoding.ASCII.GetBytes($"{protectedHeader}.{payload}");
-        var signatureBytes = privateKey.SignData(
-            signingInput,
-            ToHashAlgorithmName(suite.HashAlgorithm),
-            suite.SignatureAlgorithm == SignatureAlgorithmIdentifier.RsaPss ? RSASignaturePadding.Pss : RSASignaturePadding.Pkcs1);
-        var signature = Base64UrlEncode(signatureBytes);
-
-        return new JAdESSignatureEnvelope(
-            protectedHeader,
-            payload,
-            signature,
-            $"{protectedHeader}.{payload}.{signature}",
-            canonicalPayload,
-            GetJwsAlgorithm(suite),
-            GetDigestLabel(suite.HashAlgorithm));
+        return new JAdESJsonSignatureEnvelope(
+            serialized.Envelope.Payload,
+            serialized.Envelope.ProtectedHeader,
+            serialized.Envelope.Signature,
+            jsonDocument,
+            serialized.Envelope.CanonicalPayload,
+            serialized.Envelope.SignatureMethod,
+            serialized.Envelope.DigestMethod,
+            serialized.ProtectedHeaderJson);
     }
 
     public SignatureDescriptor ReadSignature(string compactSerialization)
@@ -143,6 +123,121 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
                 ex.Message));
         }
     }
+
+    private (JAdESSignatureEnvelope Envelope, string ProtectedHeaderJson) CreateSignatureEnvelope(
+        SignatureRequest request,
+        X509Certificate2 signingCertificate,
+        RSA privateKey,
+        SignatureSuite suite,
+        DateTimeOffset? signingTime,
+        string type)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(signingCertificate);
+        ArgumentNullException.ThrowIfNull(privateKey);
+        ArgumentNullException.ThrowIfNull(suite);
+
+        if (request.Format != SignatureFormat.JAdES)
+        {
+            throw new ArgumentException("JAdES service only accepts JAdES requests.", nameof(request));
+        }
+
+        if (request.Level != SignatureLevel.BaselineB)
+        {
+            throw new ArgumentException("JAdES Baseline-B signing requires SignatureLevel.BaselineB.", nameof(request));
+        }
+
+        if (!suite.IsRsa)
+        {
+            throw new NotSupportedException("Only RSA signature suites are supported for JAdES Baseline-B in the current implementation.");
+        }
+
+        var canonicalPayload = canonicalizer.Canonicalize(request.Payload);
+        var protectedHeaderJson = BuildProtectedHeaderJson(signingCertificate, suite, signingTime ?? DateTimeOffset.UtcNow, type);
+        var protectedHeader = Base64UrlEncode(Encoding.UTF8.GetBytes(protectedHeaderJson));
+        var encodedPayload = Base64UrlEncode(Encoding.UTF8.GetBytes(canonicalPayload));
+        var signingInput = Encoding.ASCII.GetBytes($"{protectedHeader}.{encodedPayload}");
+        var signatureBytes = privateKey.SignData(
+            signingInput,
+            ToHashAlgorithmName(suite.HashAlgorithm),
+            suite.SignatureAlgorithm == SignatureAlgorithmIdentifier.RsaPss ? RSASignaturePadding.Pss : RSASignaturePadding.Pkcs1);
+        var signature = Base64UrlEncode(signatureBytes);
+
+        return (
+            new JAdESSignatureEnvelope(
+                protectedHeader,
+                encodedPayload,
+                signature,
+                $"{protectedHeader}.{encodedPayload}.{signature}",
+                canonicalPayload,
+                GetJwsAlgorithm(suite),
+                GetDigestLabel(suite.HashAlgorithm)),
+            protectedHeaderJson);
+    }
+
+    private static string BuildProtectedHeaderJson(
+        X509Certificate2 signingCertificate,
+        SignatureSuite suite,
+        DateTimeOffset signingTime,
+        string type)
+        => JsonSerializer.Serialize(
+            new Dictionary<string, object?>
+            {
+                ["alg"] = GetJwsAlgorithm(suite),
+                ["cty"] = "json",
+                ["kid"] = BuildKeyIdentifier(signingCertificate),
+                ["x5t#S256"] = Base64UrlEncode(SHA256.HashData(signingCertificate.RawData)),
+                ["x5c"] = new[] { Convert.ToBase64String(signingCertificate.RawData) },
+                ["typ"] = type,
+                ["sigT"] = signingTime.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+                ["crit"] = new[] { "sigT" }
+            },
+            new JsonSerializerOptions
+            {
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            });
+
+    private static string BuildGeneralJsonSerialization(string payload, string protectedHeader, string signature)
+    {
+        using var stream = new MemoryStream();
+        using var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true });
+
+        writer.WriteStartObject();
+        writer.WriteString("payload", payload);
+        writer.WritePropertyName("signatures");
+        writer.WriteStartArray();
+        writer.WriteStartObject();
+        writer.WriteString("protected", protectedHeader);
+        writer.WriteString("signature", signature);
+        writer.WriteEndObject();
+        writer.WriteEndArray();
+        writer.WriteEndObject();
+        writer.Flush();
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static string BuildKeyIdentifier(X509Certificate2 signingCertificate)
+    {
+        var writer = new AsnWriter(AsnEncodingRules.DER);
+        var directoryNameTag = new Asn1Tag(TagClass.ContextSpecific, 4, isConstructed: true);
+
+        writer.PushSequence();
+        writer.PushSequence();
+        writer.PushSequence(directoryNameTag);
+        writer.WriteEncodedValue(signingCertificate.IssuerName.RawData);
+        writer.PopSequence(directoryNameTag);
+        writer.PopSequence();
+        writer.WriteInteger(ParseCertificateSerialNumber(signingCertificate.SerialNumber));
+        writer.PopSequence();
+
+        return Convert.ToBase64String(writer.Encode());
+    }
+
+    private static BigInteger ParseCertificateSerialNumber(string serialNumber)
+        => string.IsNullOrWhiteSpace(serialNumber)
+            ? BigInteger.Zero
+            : BigInteger.Parse($"00{serialNumber}", NumberStyles.HexNumber, CultureInfo.InvariantCulture);
 
     private static (string ProtectedHeader, string Payload, string Signature) ParseEnvelope(string compactSerialization)
     {

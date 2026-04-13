@@ -34,7 +34,7 @@ public class JAdESBaselineBValidatorTests
             certificate);
 
         Assert.True(result.HasTypHeader);
-        Assert.True(result.HasCanonicalizationClaim);
+        Assert.False(result.HasCanonicalizationClaim);
         Assert.Equal("RS256", result.Algorithm);
         Assert.Equal(ValidationConclusion.Invalid, result.Validation.Conclusion);
     }
@@ -64,7 +64,7 @@ public class JAdESBaselineBValidatorTests
 
         Assert.Equal(ValidationConclusion.Valid, result.Validation.Conclusion);
         Assert.True(result.HasTypHeader);
-        Assert.True(result.HasCanonicalizationClaim);
+        Assert.False(result.HasCanonicalizationClaim);
     }
 
     private static X509Certificate2 CreateSelfSignedCertificate(RSA rsa, string subjectName)
