@@ -5,7 +5,8 @@ namespace DigitalSignature.Validation;
 
 public sealed class SignatureValidationEngine(
     ICertificateChainValidator certificateChainValidator,
-    ITrustAnchorProvider trustAnchorProvider)
+    ITrustAnchorProvider trustAnchorProvider,
+    RevocationEvidenceCollector? revocationEvidenceCollector = null)
 {
     public async ValueTask<ValidationResult> ValidateAsync(
         SignatureValidationInput input,
@@ -30,7 +31,21 @@ public sealed class SignatureValidationEngine(
             return ValidationResult.Failure(certificateValidityFailure);
         }
 
-        var revocationFailure = EvaluateRevocation(input, options);
+        var revocationInfo = input.Signature.ValidationMaterial.RevocationInfo;
+        if (revocationInfo.Count == 0 && revocationEvidenceCollector is not null)
+        {
+            var collectedEvidence = await revocationEvidenceCollector.CollectAsync(
+                input.Signature.SigningCertificate,
+                input.Signature.ValidationMaterial.CertificateChain.Skip(1).FirstOrDefault(),
+                input.TemporalContext,
+                cancellationToken);
+
+            revocationInfo = collectedEvidence
+                .Select(MapRevocationInfo)
+                .ToArray();
+        }
+
+        var revocationFailure = EvaluateRevocation(revocationInfo, options);
         if (revocationFailure is not null)
         {
             return ValidationResult.Failure(revocationFailure);
@@ -65,9 +80,8 @@ public sealed class SignatureValidationEngine(
         return ValidationResult.Success(input.Signature);
     }
 
-    private static ValidationFailure? EvaluateRevocation(SignatureValidationInput input, SignatureValidationOptions options)
+    private static ValidationFailure? EvaluateRevocation(IReadOnlyList<RevocationInfo> revocationInfo, SignatureValidationOptions options)
     {
-        var revocationInfo = input.Signature.ValidationMaterial.RevocationInfo;
         if (revocationInfo.Count == 0)
         {
             return options.RequireRevocationEvidence
@@ -95,5 +109,21 @@ public sealed class SignatureValidationEngine(
         }
 
         return null;
+    }
+
+    private static RevocationInfo MapRevocationInfo(CertificateRevocationEvidence evidence)
+    {
+        return new RevocationInfo(
+            evidence.Source.ToString(),
+            evidence.ThisUpdate,
+            evidence.NextUpdate,
+            evidence.Status switch
+            {
+                CertificateRevocationStatus.Good => false,
+                CertificateRevocationStatus.Revoked => true,
+                _ => null
+            },
+            evidence.RevokedAt,
+            evidence.Reason);
     }
 }
