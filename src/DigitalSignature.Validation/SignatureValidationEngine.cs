@@ -77,7 +77,19 @@ public sealed class SignatureValidationEngine(
             return ValidationResult.Failure(chainResult.Failures.ToArray());
         }
 
-        return ValidationResult.Success(input.Signature);
+        var enrichedSignature = input.Signature with
+        {
+            ValidationMaterial = input.Signature.ValidationMaterial with
+            {
+                RevocationInfo = revocationInfo,
+                CertificateChain = chainResult.Chain.Count > 0
+                    ? chainResult.Chain
+                    : input.Signature.ValidationMaterial.CertificateChain
+            }
+        };
+
+        _ = SignatureValidationContext.Create(input, trustAnchors, revocationInfo, chainResult);
+        return ValidationResult.Success(enrichedSignature);
     }
 
     private static ValidationFailure? EvaluateRevocation(IReadOnlyList<RevocationInfo> revocationInfo, SignatureValidationOptions options)

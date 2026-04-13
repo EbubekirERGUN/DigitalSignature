@@ -173,6 +173,47 @@ public class SignatureValidationEngineTests
         Assert.Equal(ValidationConclusion.Valid, result.Conclusion);
         Assert.NotNull(result.Signature);
         Assert.Equal(SignatureFormat.CAdES, result.Signature!.Format);
+        Assert.Single(result.Signature.ValidationMaterial.CertificateChain);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_ShouldEnrichRevocationInfo_FromCollectedEvidence()
+    {
+        var anchor = new CertificateTrustAnchor("CN=Root", "ROOT", ReadOnlyMemory<byte>.Empty);
+        var engine = new SignatureValidationEngine(
+            new StubCertificateChainValidator(_ => CertificateChainValidationResult.Success([CreateSignatureDescriptor().SigningCertificate!], anchor)),
+            new StubTrustAnchorProvider(_ => [anchor]),
+            new RevocationEvidenceCollector(
+                new StubOcspResponder(_ => new CertificateRevocationEvidence(
+                    CertificateRevocationSource.Ocsp,
+                    CertificateRevocationStatus.Good,
+                    DateTimeOffset.UtcNow,
+                    DateTimeOffset.UtcNow.AddMinutes(-5),
+                    DateTimeOffset.UtcNow.AddHours(1),
+                    null,
+                    "ocsp-responder"))));
+
+        var signingCertificate = new SigningCertificateReference(
+            "CN=Signer",
+            "CN=Issuer",
+            "01",
+            "ABC",
+            NotBefore: DateTimeOffset.UtcNow.AddDays(-1).ToString("O"),
+            NotAfter: DateTimeOffset.UtcNow.AddDays(1).ToString("O"));
+        var signature = CreateSignatureDescriptor(signingCertificate, []);
+        var input = SignatureValidationInput.Create(
+            "payload"u8.ToArray(),
+            signature,
+            ValidationResult.Success(signature),
+            TemporalValidationContext.ForSigningTime(DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+
+        var result = await engine.ValidateAsync(input, new SignatureValidationOptions(RequireRevocationEvidence: true));
+
+        Assert.Equal(ValidationConclusion.Valid, result.Conclusion);
+        Assert.NotNull(result.Signature);
+        Assert.Single(result.Signature!.ValidationMaterial.RevocationInfo);
+        Assert.Equal("Ocsp", result.Signature.ValidationMaterial.RevocationInfo[0].Source);
+        Assert.False(result.Signature.ValidationMaterial.RevocationInfo[0].IsRevoked);
     }
 
     private static SignatureDescriptor CreateSignatureDescriptor(
@@ -206,5 +247,11 @@ public class SignatureValidationEngineTests
     {
         public ValueTask<IReadOnlyList<CertificateTrustAnchor>> GetTrustAnchorsAsync(SignatureFormat format, TemporalValidationContext temporalContext, CancellationToken cancellationToken = default)
             => ValueTask.FromResult(callback((format, temporalContext)));
+    }
+
+    private sealed class StubOcspResponder(Func<(SigningCertificateReference certificate, SigningCertificateReference? issuer, TemporalValidationContext context), CertificateRevocationEvidence?> callback) : IOcspResponder
+    {
+        public ValueTask<CertificateRevocationEvidence?> GetRevocationEvidenceAsync(SigningCertificateReference certificate, SigningCertificateReference? issuer, TemporalValidationContext temporalContext, CancellationToken cancellationToken = default)
+            => ValueTask.FromResult(callback((certificate, issuer, temporalContext)));
     }
 }
