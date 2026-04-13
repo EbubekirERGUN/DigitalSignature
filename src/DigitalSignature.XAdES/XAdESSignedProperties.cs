@@ -5,4 +5,7 @@ public sealed record XAdESSignedProperties(
     string SigningCertificateDigestAlgorithm,
     string SigningCertificateDigest,
     string SigningCertificateIssuerName,
-    string SigningCertificateSerialNumber);
+    string SigningCertificateSerialNumber,
+    string DataObjectReference,
+    string DataObjectMimeType,
+    string DataObjectDescription);

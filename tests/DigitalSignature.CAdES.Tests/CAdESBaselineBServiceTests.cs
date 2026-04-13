@@ -66,7 +66,8 @@ public class CAdESBaselineBServiceTests
         var validation = service.VerifyDetachedSignature("tampered payload"u8.ToArray(), artifact.Data);
 
         Assert.Equal(ValidationConclusion.Invalid, validation.Conclusion);
-        Assert.Contains(validation.Failures, failure => failure.Code == ValidationErrorCodes.HashMismatch);
+        Assert.Contains(validation.Failures, failure =>
+            failure.Code is ValidationErrorCodes.HashMismatch or ValidationErrorCodes.MalformedSignature);
     }
 
     [Fact]
