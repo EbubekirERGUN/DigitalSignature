@@ -39,7 +39,9 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         xml.LoadXml(System.Text.Encoding.UTF8.GetString(request.Payload.Span));
 
         var signingMoment = signingTime ?? DateTimeOffset.UtcNow;
-        var signedPropertiesId = $"xades-props-{Guid.NewGuid():N}";
+        var signatureId = $"Signature-{Guid.NewGuid():N}";
+        var signedPropertiesId = $"SignedProperties-{Guid.NewGuid():N}";
+        var dataObjectReferenceId = $"Reference-{Guid.NewGuid():N}";
         var digestAlgorithmUri = GetXmlDigestMethodUri(suite.HashAlgorithm);
         var certificateDigest = Convert.ToBase64String(HashCertificate(signingCertificate, suite.HashAlgorithm));
 
@@ -48,9 +50,23 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
             digestAlgorithmUri,
             certificateDigest,
             signingCertificate.Issuer,
-            signingCertificate.SerialNumber);
+            NormalizeSerialNumber(signingCertificate.SerialNumber),
+            $"#{dataObjectReferenceId}",
+            request.MimeType ?? "application/xml",
+            "Signed XML document");
+
+        EnsureDocumentHasId(xml.DocumentElement!);
 
         var signatureElement = xml.CreateElement("ds", "Signature", XmlDsigNamespace);
+        signatureElement.SetAttribute("Id", signatureId);
+
+        var objectElement = xml.CreateElement("ds", "Object", XmlDsigNamespace);
+        var qualifyingProperties = xml.CreateElement("xades", "QualifyingProperties", XAdESNamespace);
+        qualifyingProperties.SetAttribute("Target", $"#{signatureId}");
+        var signedPropertiesElement = CreateSignedPropertiesElement(xml, signedPropertiesId, signedProperties);
+        qualifyingProperties.AppendChild(signedPropertiesElement);
+        objectElement.AppendChild(qualifyingProperties);
+
         var signedInfoElement = xml.CreateElement("ds", "SignedInfo", XmlDsigNamespace);
         var canonicalizationMethod = xml.CreateElement("ds", "CanonicalizationMethod", XmlDsigNamespace);
         canonicalizationMethod.SetAttribute("Algorithm", XmlDsigExcC14NTransformUrl);
@@ -60,19 +76,15 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         signatureMethod.SetAttribute("Algorithm", GetXmlSignatureMethodUri(suite));
         signedInfoElement.AppendChild(signatureMethod);
 
-        signedInfoElement.AppendChild(CreateReference(xml, string.Empty, digestAlgorithmUri, "", enveloped: true));
-        signedInfoElement.AppendChild(CreateReference(xml, $"#{signedPropertiesId}", digestAlgorithmUri, SignedPropertiesTypeUri, enveloped: false));
+        var documentReference = CreateDocumentReference(xml, digestAlgorithmUri, dataObjectReferenceId);
+        signedInfoElement.AppendChild(documentReference);
+
+        var signedPropertiesReference = CreateSignedPropertiesReference(xml, digestAlgorithmUri, signedPropertiesId);
+        signedInfoElement.AppendChild(signedPropertiesReference);
 
         signatureElement.AppendChild(signedInfoElement);
 
-        var canonicalizedSignedInfo = canonicalizer.Canonicalize(signedInfoElement);
-        var signatureValueBytes = privateKey.SignData(
-            canonicalizedSignedInfo,
-            ToHashAlgorithmName(suite.HashAlgorithm),
-            suite.SignatureAlgorithm == SignatureAlgorithmIdentifier.RsaPss ? RSASignaturePadding.Pss : RSASignaturePadding.Pkcs1);
-
         var signatureValueElement = xml.CreateElement("ds", "SignatureValue", XmlDsigNamespace);
-        signatureValueElement.InnerText = Convert.ToBase64String(signatureValueBytes);
         signatureElement.AppendChild(signatureValueElement);
 
         var keyInfo = xml.CreateElement("ds", "KeyInfo", XmlDsigNamespace);
@@ -83,17 +95,21 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         keyInfo.AppendChild(x509Data);
         signatureElement.AppendChild(keyInfo);
 
-        var objectElement = xml.CreateElement("ds", "Object", XmlDsigNamespace);
-        var qualifyingProperties = xml.CreateElement("xades", "QualifyingProperties", XAdESNamespace);
-        qualifyingProperties.SetAttribute("Target", "#Signature");
-        var signedPropertiesElement = CreateSignedPropertiesElement(xml, signedPropertiesId, signedProperties);
-        qualifyingProperties.AppendChild(signedPropertiesElement);
-        objectElement.AppendChild(qualifyingProperties);
         signatureElement.AppendChild(objectElement);
-
         xml.DocumentElement!.AppendChild(signatureElement);
 
-        return new XAdESBaselineBSignature(xml.OuterXml, signedPropertiesId, signedProperties);
+        SetReferenceDigest(documentReference, ComputeDocumentReferenceDigest(xml, suite));
+        SetReferenceDigest(signedPropertiesReference, ComputeSignedPropertiesDigest(signedPropertiesElement, suite));
+
+        var canonicalizedSignedInfo = canonicalizer.Canonicalize(signedInfoElement);
+        var signatureValueBytes = privateKey.SignData(
+            canonicalizedSignedInfo,
+            ToHashAlgorithmName(suite.HashAlgorithm),
+            suite.SignatureAlgorithm == SignatureAlgorithmIdentifier.RsaPss ? RSASignaturePadding.Pss : RSASignaturePadding.Pkcs1);
+
+        signatureValueElement.InnerText = Convert.ToBase64String(signatureValueBytes);
+
+        return new XAdESBaselineBSignature(xml.OuterXml, signatureId, signedPropertiesId, dataObjectReferenceId, signedProperties);
     }
 
     public SignatureDescriptor ReadSignature(ReadOnlyMemory<byte> xmlSignature)
@@ -121,7 +137,8 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         {
             var xml = LoadXml(xmlSignature);
             var ns = CreateNamespaceManager(xml);
-            var signedInfo = (XmlElement?)xml.SelectSingleNode("/*/*[local-name()='Signature']/*[local-name()='SignedInfo']", ns);
+            var signature = xml.SelectSingleNode("/*/*[local-name()='Signature']", ns) as XmlElement;
+            var signedInfo = signature?.SelectSingleNode("*[local-name()='SignedInfo']", ns) as XmlElement;
             if (signedInfo is null)
             {
                 return ValidationResult.Failure(new ValidationFailure(
@@ -130,25 +147,76 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
                     "XML signature is missing SignedInfo."));
             }
 
-            var canonicalizationMethod = signedInfo.SelectSingleNode("*[local-name()='CanonicalizationMethod']") as XmlElement;
-            if (canonicalizationMethod is null)
-            {
-                return ValidationResult.Failure(new ValidationFailure(
-                    ValidationFailureKind.CanonicalizationInvalid,
-                    ValidationErrorCodes.CanonicalizationInvalid,
-                    "SignedInfo is missing CanonicalizationMethod."));
-            }
-
             var references = signedInfo.SelectNodes("*[local-name()='Reference']")?.Cast<XmlElement>().ToArray() ?? Array.Empty<XmlElement>();
+            var documentReference = references.FirstOrDefault(reference => string.IsNullOrEmpty(reference.GetAttribute("Type")));
             var signedPropertiesReference = references.FirstOrDefault(reference =>
                 string.Equals(reference.GetAttribute("Type"), SignedPropertiesTypeUri, StringComparison.Ordinal));
 
-            if (signedPropertiesReference is null)
+            if (documentReference is null || signedPropertiesReference is null)
             {
                 return ValidationResult.Failure(new ValidationFailure(
                     ValidationFailureKind.ReferenceResolutionFailed,
                     ValidationErrorCodes.ReferenceResolutionFailed,
-                    "SignedInfo is missing the XAdES SignedProperties reference."));
+                    "SignedInfo is missing required XAdES references."));
+            }
+
+            if (!ValidateReferenceDigest(documentReference, ComputeDocumentReferenceDigest(xml, ParseSuiteFromSignature(xml))))
+            {
+                return ValidationResult.Failure(new ValidationFailure(
+                    ValidationFailureKind.HashMismatch,
+                    ValidationErrorCodes.HashMismatch,
+                    "Document reference digest does not match the canonicalized XML payload."));
+            }
+
+            var signedPropertiesElement = xml.SelectSingleNode("//*[local-name()='SignedProperties']", ns) as XmlElement;
+            if (signedPropertiesElement is null)
+            {
+                return ValidationResult.Failure(new ValidationFailure(
+                    ValidationFailureKind.ReferenceResolutionFailed,
+                    ValidationErrorCodes.ReferenceResolutionFailed,
+                    "XAdES SignedProperties element is missing."));
+            }
+
+            if (!ValidateReferenceDigest(signedPropertiesReference, ComputeSignedPropertiesDigest(signedPropertiesElement, ParseSuiteFromSignature(xml))))
+            {
+                return ValidationResult.Failure(new ValidationFailure(
+                    ValidationFailureKind.HashMismatch,
+                    ValidationErrorCodes.HashMismatch,
+                    "SignedProperties reference digest does not match the canonicalized SignedProperties element."));
+            }
+
+            var signatureValue = signature.SelectSingleNode("*[local-name()='SignatureValue']", ns)?.InnerText;
+            var certificate = GetSigningCertificate(xml);
+            if (certificate is null || string.IsNullOrWhiteSpace(signatureValue))
+            {
+                return ValidationResult.Failure(new ValidationFailure(
+                    ValidationFailureKind.MalformedSignature,
+                    ValidationErrorCodes.MalformedSignature,
+                    "Signature is missing SignatureValue or X509Certificate."));
+            }
+
+            using var rsa = certificate.GetRSAPublicKey();
+            if (rsa is null)
+            {
+                return ValidationResult.Failure(new ValidationFailure(
+                    ValidationFailureKind.UnsupportedAlgorithm,
+                    ValidationErrorCodes.UnsupportedAlgorithm,
+                    "Signing certificate does not expose an RSA public key."));
+            }
+
+            var suite = ParseSuiteFromSignature(xml);
+            var verified = rsa.VerifyData(
+                canonicalizer.Canonicalize(signedInfo),
+                Convert.FromBase64String(signatureValue),
+                ToHashAlgorithmName(suite.HashAlgorithm),
+                suite.SignatureAlgorithm == SignatureAlgorithmIdentifier.RsaPss ? RSASignaturePadding.Pss : RSASignaturePadding.Pkcs1);
+
+            if (!verified)
+            {
+                return ValidationResult.Failure(new ValidationFailure(
+                    ValidationFailureKind.SignatureValueInvalid,
+                    ValidationErrorCodes.SignatureValueInvalid,
+                    "XML SignatureValue verification failed."));
             }
 
             return ValidationResult.Success(ReadSignature(xmlSignature));
@@ -173,7 +241,7 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         signingTime.InnerText = signedProperties.SigningTime;
         signedSignatureProperties.AppendChild(signingTime);
 
-        var signingCertificate = xml.CreateElement("xades", "SigningCertificate", XAdESNamespace);
+        var signingCertificate = xml.CreateElement("xades", "SigningCertificateV2", XAdESNamespace);
         var cert = xml.CreateElement("xades", "Cert", XAdESNamespace);
         var certDigest = xml.CreateElement("xades", "CertDigest", XAdESNamespace);
         var digestMethod = xml.CreateElement("ds", "DigestMethod", XmlDsigNamespace);
@@ -184,43 +252,39 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         certDigest.AppendChild(digestValue);
         cert.AppendChild(certDigest);
 
-        var issuerSerial = xml.CreateElement("xades", "IssuerSerial", XAdESNamespace);
-        var issuerName = xml.CreateElement("ds", "X509IssuerName", XmlDsigNamespace);
-        issuerName.InnerText = signedProperties.SigningCertificateIssuerName;
-        var serialNumber = xml.CreateElement("ds", "X509SerialNumber", XmlDsigNamespace);
-        serialNumber.InnerText = signedProperties.SigningCertificateSerialNumber;
-        issuerSerial.AppendChild(issuerName);
-        issuerSerial.AppendChild(serialNumber);
+        var issuerSerial = xml.CreateElement("xades", "IssuerSerialV2", XAdESNamespace);
+        issuerSerial.InnerText = $"{signedProperties.SigningCertificateIssuerName},{signedProperties.SigningCertificateSerialNumber}";
         cert.AppendChild(issuerSerial);
 
         signingCertificate.AppendChild(cert);
         signedSignatureProperties.AppendChild(signingCertificate);
         signedPropertiesElement.AppendChild(signedSignatureProperties);
 
+        var signedDataObjectProperties = xml.CreateElement("xades", "SignedDataObjectProperties", XAdESNamespace);
+        var dataObjectFormat = xml.CreateElement("xades", "DataObjectFormat", XAdESNamespace);
+        dataObjectFormat.SetAttribute("ObjectReference", signedProperties.DataObjectReference);
+        var description = xml.CreateElement("xades", "Description", XAdESNamespace);
+        description.InnerText = signedProperties.DataObjectDescription;
+        var mimeType = xml.CreateElement("xades", "MimeType", XAdESNamespace);
+        mimeType.InnerText = signedProperties.DataObjectMimeType;
+        dataObjectFormat.AppendChild(description);
+        dataObjectFormat.AppendChild(mimeType);
+        signedDataObjectProperties.AppendChild(dataObjectFormat);
+        signedPropertiesElement.AppendChild(signedDataObjectProperties);
+
         return signedPropertiesElement;
     }
 
-    private XmlElement CreateReference(XmlDocument xml, string uri, string digestMethodUri, string type, bool enveloped)
+    private XmlElement CreateDocumentReference(XmlDocument xml, string digestMethodUri, string id)
     {
         var reference = xml.CreateElement("ds", "Reference", XmlDsigNamespace);
-        if (!string.IsNullOrEmpty(uri))
-        {
-            reference.SetAttribute("URI", uri);
-        }
-
-        if (!string.IsNullOrEmpty(type))
-        {
-            reference.SetAttribute("Type", type);
-        }
+        reference.SetAttribute("Id", id);
+        reference.SetAttribute("URI", string.Empty);
 
         var transforms = xml.CreateElement("ds", "Transforms", XmlDsigNamespace);
-        if (enveloped)
-        {
-            var envelopedSignatureTransform = xml.CreateElement("ds", "Transform", XmlDsigNamespace);
-            envelopedSignatureTransform.SetAttribute("Algorithm", XmlDsigEnvelopedSignatureTransformUrl);
-            transforms.AppendChild(envelopedSignatureTransform);
-        }
-
+        var envelopedSignatureTransform = xml.CreateElement("ds", "Transform", XmlDsigNamespace);
+        envelopedSignatureTransform.SetAttribute("Algorithm", XmlDsigEnvelopedSignatureTransformUrl);
+        transforms.AppendChild(envelopedSignatureTransform);
         var canonicalizationTransform = xml.CreateElement("ds", "Transform", XmlDsigNamespace);
         canonicalizationTransform.SetAttribute("Algorithm", XmlDsigExcC14NTransformUrl);
         transforms.AppendChild(canonicalizationTransform);
@@ -231,10 +295,65 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         reference.AppendChild(digestMethod);
 
         var digestValue = xml.CreateElement("ds", "DigestValue", XmlDsigNamespace);
-        digestValue.InnerText = "PENDING";
         reference.AppendChild(digestValue);
-
         return reference;
+    }
+
+    private XmlElement CreateSignedPropertiesReference(XmlDocument xml, string digestMethodUri, string signedPropertiesId)
+    {
+        var reference = xml.CreateElement("ds", "Reference", XmlDsigNamespace);
+        reference.SetAttribute("Type", SignedPropertiesTypeUri);
+        reference.SetAttribute("URI", $"#{signedPropertiesId}");
+
+        var transforms = xml.CreateElement("ds", "Transforms", XmlDsigNamespace);
+        var canonicalizationTransform = xml.CreateElement("ds", "Transform", XmlDsigNamespace);
+        canonicalizationTransform.SetAttribute("Algorithm", XmlDsigExcC14NTransformUrl);
+        transforms.AppendChild(canonicalizationTransform);
+        reference.AppendChild(transforms);
+
+        var digestMethod = xml.CreateElement("ds", "DigestMethod", XmlDsigNamespace);
+        digestMethod.SetAttribute("Algorithm", digestMethodUri);
+        reference.AppendChild(digestMethod);
+
+        var digestValue = xml.CreateElement("ds", "DigestValue", XmlDsigNamespace);
+        reference.AppendChild(digestValue);
+        return reference;
+    }
+
+    private byte[] ComputeDocumentReferenceDigest(XmlDocument xml, SignatureSuite suite)
+    {
+        var clone = new XmlDocument { PreserveWhitespace = true };
+        clone.LoadXml(xml.OuterXml);
+        var signatureNode = clone.SelectSingleNode("/*/*[local-name()='Signature']");
+        signatureNode?.ParentNode?.RemoveChild(signatureNode);
+        var canonicalized = canonicalizer.Canonicalize(clone.DocumentElement!);
+        return HashData(canonicalized, suite.HashAlgorithm);
+    }
+
+    private byte[] ComputeSignedPropertiesDigest(XmlElement signedPropertiesElement, SignatureSuite suite)
+        => HashData(canonicalizer.Canonicalize(signedPropertiesElement), suite.HashAlgorithm);
+
+    private static void SetReferenceDigest(XmlElement reference, byte[] digest)
+    {
+        var digestValue = reference.SelectSingleNode("*[local-name()='DigestValue']") as XmlElement;
+        if (digestValue is not null)
+        {
+            digestValue.InnerText = Convert.ToBase64String(digest);
+        }
+    }
+
+    private static bool ValidateReferenceDigest(XmlElement reference, byte[] expectedDigest)
+    {
+        var digestValue = reference.SelectSingleNode("*[local-name()='DigestValue']")?.InnerText;
+        return string.Equals(digestValue, Convert.ToBase64String(expectedDigest), StringComparison.Ordinal);
+    }
+
+    private static void EnsureDocumentHasId(XmlElement documentElement)
+    {
+        if (!documentElement.HasAttribute("Id") && !documentElement.HasAttribute("ID") && !documentElement.HasAttribute("id"))
+        {
+            documentElement.SetAttribute("Id", $"Object-{Guid.NewGuid():N}");
+        }
     }
 
     private static XmlDocument LoadXml(ReadOnlyMemory<byte> xmlBytes)
@@ -261,12 +380,17 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
             return null;
         }
 
+        var dataObjectFormat = xml.SelectSingleNode("//*[local-name()='SignedProperties']/*[local-name()='SignedDataObjectProperties']/*[local-name()='DataObjectFormat']", ns);
+
         return new XAdESSignedProperties(
             baseNode.SelectSingleNode("*[local-name()='SigningTime']", ns)?.InnerText ?? string.Empty,
-            baseNode.SelectSingleNode("*[local-name()='SigningCertificate']/*[local-name()='Cert']/*[local-name()='CertDigest']/*[local-name()='DigestMethod']", ns)?.Attributes?["Algorithm"]?.Value ?? string.Empty,
-            baseNode.SelectSingleNode("*[local-name()='SigningCertificate']/*[local-name()='Cert']/*[local-name()='CertDigest']/*[local-name()='DigestValue']", ns)?.InnerText ?? string.Empty,
-            baseNode.SelectSingleNode("*[local-name()='SigningCertificate']/*[local-name()='Cert']/*[local-name()='IssuerSerial']/*[local-name()='X509IssuerName']", ns)?.InnerText ?? string.Empty,
-            baseNode.SelectSingleNode("*[local-name()='SigningCertificate']/*[local-name()='Cert']/*[local-name()='IssuerSerial']/*[local-name()='X509SerialNumber']", ns)?.InnerText ?? string.Empty);
+            baseNode.SelectSingleNode("*[local-name()='SigningCertificateV2']/*[local-name()='Cert']/*[local-name()='CertDigest']/*[local-name()='DigestMethod']", ns)?.Attributes?["Algorithm"]?.Value ?? string.Empty,
+            baseNode.SelectSingleNode("*[local-name()='SigningCertificateV2']/*[local-name()='Cert']/*[local-name()='CertDigest']/*[local-name()='DigestValue']", ns)?.InnerText ?? string.Empty,
+            ExtractIssuerName(baseNode.SelectSingleNode("*[local-name()='SigningCertificateV2']/*[local-name()='Cert']/*[local-name()='IssuerSerialV2']", ns)?.InnerText),
+            ExtractSerialNumber(baseNode.SelectSingleNode("*[local-name()='SigningCertificateV2']/*[local-name()='Cert']/*[local-name()='IssuerSerialV2']", ns)?.InnerText),
+            dataObjectFormat?.Attributes?["ObjectReference"]?.Value ?? string.Empty,
+            dataObjectFormat?.SelectSingleNode("*[local-name()='MimeType']", ns)?.InnerText ?? string.Empty,
+            dataObjectFormat?.SelectSingleNode("*[local-name()='Description']", ns)?.InnerText ?? string.Empty);
     }
 
     private static X509Certificate2? GetSigningCertificate(XmlDocument xml)
@@ -278,11 +402,36 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
             : X509CertificateLoader.LoadCertificate(Convert.FromBase64String(certificateText));
     }
 
+    private static SignatureSuite ParseSuiteFromSignature(XmlDocument xml)
+    {
+        var ns = CreateNamespaceManager(xml);
+        var algorithm = (xml.SelectSingleNode("//*[local-name()='SignatureMethod']", ns) as XmlElement)?.GetAttribute("Algorithm");
+
+        return algorithm switch
+        {
+            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256" => new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048, NamedCurve.None, true),
+            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha384" => new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha384, 2048, NamedCurve.None, true),
+            "http://www.w3.org/2001/04/xmldsig-more#rsa-sha512" => new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha512, 2048, NamedCurve.None, true),
+            "http://www.w3.org/2007/05/xmldsig-more#sha256-rsa-MGF1" => new SignatureSuite(SignatureAlgorithmIdentifier.RsaPss, HashAlgorithmIdentifier.Sha256, 2048, NamedCurve.None, true),
+            "http://www.w3.org/2007/05/xmldsig-more#sha384-rsa-MGF1" => new SignatureSuite(SignatureAlgorithmIdentifier.RsaPss, HashAlgorithmIdentifier.Sha384, 2048, NamedCurve.None, true),
+            "http://www.w3.org/2007/05/xmldsig-more#sha512-rsa-MGF1" => new SignatureSuite(SignatureAlgorithmIdentifier.RsaPss, HashAlgorithmIdentifier.Sha512, 2048, NamedCurve.None, true),
+            _ => throw new NotSupportedException("Unsupported XML signature suite.")
+        };
+    }
+
     private static byte[] HashCertificate(X509Certificate2 certificate, HashAlgorithmIdentifier algorithm) => algorithm switch
     {
         HashAlgorithmIdentifier.Sha256 => SHA256.HashData(certificate.RawData),
         HashAlgorithmIdentifier.Sha384 => SHA384.HashData(certificate.RawData),
         HashAlgorithmIdentifier.Sha512 => SHA512.HashData(certificate.RawData),
+        _ => throw new NotSupportedException($"Unsupported digest algorithm: {algorithm}.")
+    };
+
+    private static byte[] HashData(byte[] data, HashAlgorithmIdentifier algorithm) => algorithm switch
+    {
+        HashAlgorithmIdentifier.Sha256 => SHA256.HashData(data),
+        HashAlgorithmIdentifier.Sha384 => SHA384.HashData(data),
+        HashAlgorithmIdentifier.Sha512 => SHA512.HashData(data),
         _ => throw new NotSupportedException($"Unsupported digest algorithm: {algorithm}.")
     };
 
@@ -320,6 +469,31 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         SignatureAlgorithmIdentifier.RsaPss when suite.HashAlgorithm == HashAlgorithmIdentifier.Sha512 => "http://www.w3.org/2007/05/xmldsig-more#sha512-rsa-MGF1",
         _ => throw new NotSupportedException("Unsupported XML signature suite.")
     };
+
+    private static string NormalizeSerialNumber(string serialNumber)
+        => string.IsNullOrWhiteSpace(serialNumber) ? string.Empty : System.Numerics.BigInteger.Parse($"00{serialNumber}", System.Globalization.NumberStyles.HexNumber).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    private static string ExtractIssuerName(string? issuerSerialV2)
+    {
+        if (string.IsNullOrWhiteSpace(issuerSerialV2))
+        {
+            return string.Empty;
+        }
+
+        var separator = issuerSerialV2.LastIndexOf(',');
+        return separator <= 0 ? issuerSerialV2 : issuerSerialV2[..separator];
+    }
+
+    private static string ExtractSerialNumber(string? issuerSerialV2)
+    {
+        if (string.IsNullOrWhiteSpace(issuerSerialV2))
+        {
+            return string.Empty;
+        }
+
+        var separator = issuerSerialV2.LastIndexOf(',');
+        return separator < 0 || separator == issuerSerialV2.Length - 1 ? string.Empty : issuerSerialV2[(separator + 1)..];
+    }
 
     private const string XmlDsigNamespace = "http://www.w3.org/2000/09/xmldsig#";
     private const string XAdESNamespace = "http://uri.etsi.org/01903/v1.3.2#";

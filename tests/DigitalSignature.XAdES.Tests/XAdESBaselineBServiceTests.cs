@@ -33,6 +33,8 @@ public class XAdESBaselineBServiceTests
 
         Assert.Contains("SignedProperties", signature.XmlDocument);
         Assert.Contains("CanonicalizationMethod", signature.XmlDocument);
+        Assert.Contains("SigningCertificateV2", signature.XmlDocument);
+        Assert.Contains("SignedDataObjectProperties", signature.XmlDocument);
         Assert.Equal(SignatureFormat.XAdES, descriptor.Format);
         Assert.Equal(SignatureLevel.BaselineB, descriptor.Level);
         Assert.NotNull(descriptor.SigningCertificate);

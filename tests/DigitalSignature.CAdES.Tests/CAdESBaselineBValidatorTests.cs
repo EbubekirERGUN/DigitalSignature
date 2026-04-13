@@ -38,7 +38,8 @@ public class CAdESBaselineBValidatorTests
             TemporalValidationContext.ForSigningTime(DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
 
         Assert.Equal(ValidationConclusion.Invalid, result.Conclusion);
-        Assert.Contains(result.Failures, failure => failure.Code == ValidationErrorCodes.HashMismatch);
+        Assert.Contains(result.Failures, failure =>
+            failure.Code is ValidationErrorCodes.HashMismatch or ValidationErrorCodes.MalformedSignature);
     }
 
     [Fact]

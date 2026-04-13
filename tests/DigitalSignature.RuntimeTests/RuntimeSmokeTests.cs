@@ -57,7 +57,8 @@ public class RuntimeSmokeTests
         var service = new PAdESBaselineBService();
         var verifier = new PAdESBaselineBVerifier();
         var binding = service.PrepareDetachedSignaturePlaceholder(RuntimeSmokeFixtures.PadesPayload, 512);
-        var signed = service.ApplyDetachedSignature(binding, new byte[] { 0x01, 0x02, 0x03, 0x04 });
+        var prepared = service.PrepareDetachedSignatureInput(binding);
+        var signed = service.ApplyDetachedSignature(prepared, new byte[] { 0x01, 0x02, 0x03, 0x04 });
         var verification = verifier.Verify(signed);
 
         Assert.Equal(ValidationConclusion.Valid, verification.Validation.Conclusion);
