@@ -13,4 +13,6 @@ public static class ValidationErrorCodes
     public const string UnsupportedFormat = "validation.unsupported_format";
     public const string UnsupportedAlgorithm = "validation.unsupported_algorithm";
     public const string MalformedSignature = "validation.malformed_signature";
+    public const string JsonCanonicalizationInvalid = "validation.json_canonicalization_invalid";
+    public const string JwsMalformed = "validation.jws_malformed";
 }
