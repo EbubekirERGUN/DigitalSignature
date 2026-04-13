@@ -23,7 +23,8 @@ public sealed class ASiCSBaselineBService
         X509Certificate2 signingCertificate,
         RSA privateKey,
         SignatureSuite suite,
-        DateTimeOffset? signingTime = null)
+        DateTimeOffset? signingTime = null,
+        TimestampMaterial? signatureTimestamp = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(signingCertificate);
@@ -35,26 +36,31 @@ public sealed class ASiCSBaselineBService
             throw new ArgumentException("ASiC service only accepts ASiC requests.", nameof(request));
         }
 
-        if (request.Level != SignatureLevel.BaselineB)
+        if (request.Level is not SignatureLevel.BaselineB and not SignatureLevel.BaselineT)
         {
-            throw new ArgumentException("ASiC Baseline-B signing requires SignatureLevel.BaselineB.", nameof(request));
+            throw new ArgumentException("ASiC signing currently supports only SignatureLevel.BaselineB and SignatureLevel.BaselineT.", nameof(request));
         }
 
         if (!suite.IsRsa)
         {
-            throw new NotSupportedException("Only RSA signature suites are supported for ASiC Baseline-B in the current implementation.");
+            throw new NotSupportedException("Only RSA signature suites are supported for ASiC Baseline signatures in the current implementation.");
+        }
+
+        if (request.Level == SignatureLevel.BaselineT && signatureTimestamp is null)
+        {
+            throw new InvalidOperationException("ASiC Baseline-T signing requires a CAdES signature timestamp token.");
         }
 
         var normalizedPayloadEntryName = NormalizePayloadEntryName(payloadEntryName);
         var cadesRequest = new SignatureRequest(
             SignatureFormat.CAdES,
-            SignatureLevel.BaselineB,
+            request.Level,
             request.Payload,
             request.MimeType,
             "detached");
 
-        var signature = _cadesService.CreateDetachedSignature(cadesRequest, signingCertificate, privateKey, suite, signingTime);
-        var createdAt = signingTime ?? DateTimeOffset.UtcNow;
+        var signature = _cadesService.CreateDetachedSignature(cadesRequest, signingCertificate, privateKey, suite, signingTime, signatureTimestamp);
+        var createdAt = signingTime ?? signatureTimestamp?.CreatedAt ?? DateTimeOffset.UtcNow;
         var containerBytes = StoredZipContainerBuilder.Build(
             [
                 new StoredZipEntry(MimeTypeEntryName, Encoding.UTF8.GetBytes(ContainerMediaType)),
@@ -64,7 +70,7 @@ public sealed class ASiCSBaselineBService
             createdAt);
 
         return new ASiCSBaselineBArtifact(
-            new SignatureArtifact(SignatureFormat.ASiC, SignatureLevel.BaselineB, containerBytes, ContainerMediaType),
+            new SignatureArtifact(SignatureFormat.ASiC, request.Level, containerBytes, ContainerMediaType),
             normalizedPayloadEntryName,
             SignatureEntryName);
     }
@@ -202,7 +208,7 @@ public sealed class ASiCSBaselineBService
     private static SignatureDescriptor ToAsicDescriptor(SignatureDescriptor source) =>
         new(
             SignatureFormat.ASiC,
-            SignatureLevel.BaselineB,
+            source.Level,
             source.SigningCertificate,
             source.SigningTime,
             source.ValidationMaterial,
@@ -325,7 +331,7 @@ public sealed class ASiCSBaselineBService
             stream.Write(entryNameBytes);
             stream.Write(entry.Data);
 
-            return new ZipEntryMetadata(entryNameBytes, crc32, size, dosDate, dosTime, headerOffset);
+            return new ZipEntryMetadata(entry.Name, entryNameBytes, crc32, size, dosDate, dosTime, headerOffset);
         }
 
         private static void WriteCentralDirectoryHeader(Stream stream, ZipEntryMetadata entry)
@@ -362,6 +368,21 @@ public sealed class ASiCSBaselineBService
             WriteUInt16(stream, 0);
         }
 
+        private static (ushort DosDate, ushort DosTime) ToDosTimestamp(DateTimeOffset timestamp)
+        {
+            var local = timestamp.UtcDateTime;
+            var year = Math.Clamp(local.Year, 1980, 2107);
+            var month = Math.Clamp(local.Month, 1, 12);
+            var day = Math.Clamp(local.Day, 1, DateTime.DaysInMonth(year, month));
+            var hour = Math.Clamp(local.Hour, 0, 23);
+            var minute = Math.Clamp(local.Minute, 0, 59);
+            var second = Math.Clamp(local.Second, 0, 59) / 2;
+
+            var dosDate = (ushort)(((year - 1980) << 9) | (month << 5) | day);
+            var dosTime = (ushort)((hour << 11) | (minute << 5) | second);
+            return (dosDate, dosTime);
+        }
+
         private static void WriteUInt16(Stream stream, ushort value)
         {
             Span<byte> buffer = stackalloc byte[2];
@@ -376,60 +397,48 @@ public sealed class ASiCSBaselineBService
             stream.Write(buffer);
         }
 
-        private static (ushort DosDate, ushort DosTime) ToDosTimestamp(DateTimeOffset timestamp)
-        {
-            var value = timestamp.UtcDateTime;
-            var year = Math.Clamp(value.Year, 1980, 2107);
-            var month = Math.Clamp(value.Month, 1, 12);
-            var day = Math.Clamp(value.Day, 1, 31);
-            var hour = Math.Clamp(value.Hour, 0, 23);
-            var minute = Math.Clamp(value.Minute, 0, 59);
-            var second = Math.Clamp(value.Second, 0, 59) / 2;
-
-            var dosDate = (ushort)(((year - 1980) << 9) | (month << 5) | day);
-            var dosTime = (ushort)((hour << 11) | (minute << 5) | second);
-            return (dosDate, dosTime);
-        }
-
-        private readonly record struct ZipEntryMetadata(
+        private sealed record ZipEntryMetadata(
+            string EntryName,
             byte[] EntryNameBytes,
             uint Crc32,
             uint Size,
             ushort DosDate,
             ushort DosTime,
             uint LocalHeaderOffset);
+    }
 
-        private static class Crc32
+    private static class Crc32
+    {
+        private static readonly uint[] Table = BuildTable();
+
+        public static uint Compute(ReadOnlySpan<byte> data)
         {
-            private static readonly uint[] Table = CreateTable();
-
-            public static uint Compute(ReadOnlySpan<byte> data)
+            uint crc = 0xFFFFFFFF;
+            foreach (var b in data)
             {
-                var crc = 0xFFFFFFFFu;
-                foreach (var value in data)
-                {
-                    crc = Table[(crc ^ value) & 0xFF] ^ (crc >> 8);
-                }
-
-                return ~crc;
+                crc = (crc >> 8) ^ Table[(crc ^ b) & 0xFF];
             }
 
-            private static uint[] CreateTable()
-            {
-                var table = new uint[256];
-                for (uint i = 0; i < table.Length; i++)
-                {
-                    var value = i;
-                    for (var bit = 0; bit < 8; bit++)
-                    {
-                        value = (value & 1) == 1 ? 0xEDB88320u ^ (value >> 1) : value >> 1;
-                    }
+            return ~crc;
+        }
 
-                    table[i] = value;
+        private static uint[] BuildTable()
+        {
+            var table = new uint[256];
+            for (uint i = 0; i < table.Length; i++)
+            {
+                uint value = i;
+                for (var bit = 0; bit < 8; bit++)
+                {
+                    value = (value & 1) != 0
+                        ? 0xEDB88320u ^ (value >> 1)
+                        : value >> 1;
                 }
 
-                return table;
+                table[i] = value;
             }
+
+            return table;
         }
     }
 }

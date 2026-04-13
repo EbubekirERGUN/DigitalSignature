@@ -31,6 +31,34 @@ public class RuntimeSmokeTests
     }
 
     [Fact]
+    public async Task ASiC_RuntimeSmoke_ShouldCreateAndVerifyBaselineTContainer()
+    {
+        using var material = new RuntimeMaterial();
+        var service = new ASiCSBaselineBService();
+        var baselineBRequest = new SignatureRequest(SignatureFormat.ASiC, SignatureLevel.BaselineB, RuntimeSmokeFixtures.AsicPayload);
+
+        var baselineBArtifact = service.CreateContainer(baselineBRequest, "runtime.txt", material.Certificate, material.Key, material.Suite);
+        var timestampMaterial = await CreateTimestampForDetachedSignatureInsideContainerAsync(
+            baselineBArtifact.Container.Data,
+            baselineBRequest.Payload,
+            material.TimestampProvider);
+
+        var baselineTArtifact = service.CreateContainer(
+            baselineBRequest with { Level = SignatureLevel.BaselineT },
+            "runtime.txt",
+            material.Certificate,
+            material.Key,
+            material.Suite,
+            signatureTimestamp: timestampMaterial);
+        var verification = service.VerifyContainer(baselineTArtifact.Container.Data);
+
+        Assert.Equal(ValidationConclusion.Valid, verification.Validation.Conclusion);
+        Assert.NotNull(verification.Validation.Signature);
+        Assert.Equal(SignatureLevel.BaselineT, verification.Validation.Signature!.Level);
+        Assert.Single(verification.Validation.Signature.ValidationMaterial.Timestamps);
+    }
+
+    [Fact]
     public void CAdES_RuntimeSmoke_ShouldCreateAndVerifyDetachedSignature()
     {
         using var material = new RuntimeMaterial();
@@ -131,8 +159,31 @@ public class RuntimeSmokeTests
     {
         var signedCms = new SignedCms();
         signedCms.Decode(signature.ToArray());
+        return await CreateTimestampFromSignerInfoAsync(signedCms.SignerInfos[0], timestampProvider);
+    }
+
+    private static async Task<TimestampMaterial> CreateTimestampForDetachedSignatureInsideContainerAsync(
+        ReadOnlyMemory<byte> containerBytes,
+        ReadOnlyMemory<byte> payload,
+        ITimestampProvider timestampProvider)
+    {
+        using var archive = new System.IO.Compression.ZipArchive(new MemoryStream(containerBytes.ToArray()), System.IO.Compression.ZipArchiveMode.Read);
+        var signatureEntry = archive.GetEntry("META-INF/signature.p7s")!;
+        using var source = signatureEntry.Open();
+        using var ms = new MemoryStream();
+        await source.CopyToAsync(ms);
+
+        var signedCms = new SignedCms(new ContentInfo(payload.ToArray()), detached: true);
+        signedCms.Decode(ms.ToArray());
+        return await CreateTimestampFromSignerInfoAsync(signedCms.SignerInfos[0], timestampProvider);
+    }
+
+    private static async Task<TimestampMaterial> CreateTimestampFromSignerInfoAsync(
+        SignerInfo signerInfo,
+        ITimestampProvider timestampProvider)
+    {
         var timestampRequest = Rfc3161TimestampRequest.CreateFromSignerInfo(
-            signedCms.SignerInfos[0],
+            signerInfo,
             HashAlgorithmName.SHA256,
             null,
             null,
