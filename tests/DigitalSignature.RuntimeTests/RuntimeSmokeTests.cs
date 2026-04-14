@@ -140,17 +140,32 @@ public class RuntimeSmokeTests
     }
 
     [Fact]
-    public void PAdES_RuntimeSmoke_ShouldPrepareBindAndVerifySignatureContainer()
+    public async Task PAdES_RuntimeSmoke_ShouldPrepareBindAndVerifyTimestampedSignatureContainer()
     {
+        using var material = new RuntimeMaterial();
         var service = new PAdESBaselineBService();
         var verifier = new PAdESBaselineBVerifier();
-        var binding = service.PrepareDetachedSignaturePlaceholder(RuntimeSmokeFixtures.PadesPayload, 512);
+        var cadesService = new CAdESBaselineBService();
+        var binding = service.PrepareDetachedSignaturePlaceholder(RuntimeSmokeFixtures.PadesPayload, 8192);
         var prepared = service.PrepareDetachedSignatureInput(binding);
-        var signed = service.ApplyDetachedSignature(prepared, new byte[] { 0x01, 0x02, 0x03, 0x04 });
+        var baselineBSignature = cadesService.CreateDetachedSignature(
+            new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, prepared.SignedBytes),
+            material.Certificate,
+            material.Key,
+            material.Suite);
+        var baselineTSignature = cadesService.CreateDetachedSignature(
+            new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineT, prepared.SignedBytes),
+            material.Certificate,
+            material.Key,
+            material.Suite,
+            signatureTimestamp: await CreateTimestampForDetachedCmsAsync(prepared.SignedBytes, baselineBSignature.Data, material.TimestampProvider));
+        var signed = service.ApplyDetachedSignature(prepared, baselineTSignature.Data);
         var verification = verifier.Verify(signed);
 
         Assert.Equal(ValidationConclusion.Valid, verification.Validation.Conclusion);
         Assert.True(verification.HasDetachedCAdESSignature);
+        Assert.NotNull(verification.Validation.Signature);
+        Assert.Equal(SignatureLevel.BaselineT, verification.Validation.Signature!.Level);
     }
 
     private static async Task<TimestampMaterial> CreateTimestampForAttachedSignatureAsync(
@@ -175,6 +190,16 @@ public class RuntimeSmokeTests
 
         var signedCms = new SignedCms(new ContentInfo(payload.ToArray()), detached: true);
         signedCms.Decode(ms.ToArray());
+        return await CreateTimestampFromSignerInfoAsync(signedCms.SignerInfos[0], timestampProvider);
+    }
+
+    private static async Task<TimestampMaterial> CreateTimestampForDetachedCmsAsync(
+        ReadOnlyMemory<byte> payload,
+        ReadOnlyMemory<byte> signature,
+        ITimestampProvider timestampProvider)
+    {
+        var signedCms = new SignedCms(new ContentInfo(payload.ToArray()), detached: true);
+        signedCms.Decode(signature.ToArray());
         return await CreateTimestampFromSignerInfoAsync(signedCms.SignerInfos[0], timestampProvider);
     }
 
