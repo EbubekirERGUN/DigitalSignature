@@ -1,40 +1,18 @@
 # DigitalSignature
 
-.NET 10 tabanlı, ETSI odaklı dijital imza geliştirme ve doğrulama projesi.
+.NET 10 tabanlı dijital imza kütüphanesi.
 
-## Kapsam
+## Destek durumu
 
-Bu repo şu formatlar üzerinde çalışır:
+| Format | Baseline-B | Baseline-T | Durum |
+|---|---:|---:|---|
+| CAdES | Yes | Yes | Çalışıyor |
+| XAdES | Yes | Yes | Çalışıyor |
+| PAdES | Yes | Yes | Çalışıyor |
+| ASiC-S | Yes | Yes | Çalışıyor |
+| JAdES | Yes | Partial | Baseline-B çalışıyor, T tamam değil |
 
-- CAdES
-- XAdES
-- PAdES
-- JAdES
-- ASiC-S
-
-Ayrıca şu alanları da kapsar:
-
-- validation engine
-- timestamp integration
-- augmentation flow
-- ETSI checker interoperability
-- runtime smoke verification
-
-## Mevcut durum
-
-| Format | Baseline-B | Baseline-T | Local | ETSI |
-|---|---:|---:|---:|---:|
-| CAdES | Done | Done | Pass | Pass |
-| XAdES | Done | Done | Pass | Pass |
-| PAdES | Done | Done | Pass | Pass |
-| ASiC-S | Done | Done | Pass | Pass |
-| JAdES | Done | In progress / parked | Mixed | In progress |
-
-Not:
-- JAdES Baseline-B checker uyumlu
-- JAdES-T tarafında ETSI ile local model arasında serialization / verification uyumu üzerinde ek çalışma gerekiyor
-
-## Hızlı başlangıç
+## Kurulum
 
 ```bash
 dotnet restore DigitalSignature.slnx
@@ -42,34 +20,50 @@ dotnet build DigitalSignature.slnx
 dotnet test DigitalSignature.slnx
 ```
 
-## Repo yapısı
+## Kısa kullanım örneği
 
-- `src/DigitalSignature.Abstractions` → ortak model ve kontratlar
-- `src/DigitalSignature.Core` → ortak çekirdek servisler
-- `src/DigitalSignature.CAdES` → CAdES üretim/doğrulama
-- `src/DigitalSignature.XAdES` → XAdES üretim/doğrulama
-- `src/DigitalSignature.PAdES` → PAdES üretim/doğrulama
-- `src/DigitalSignature.JAdES` → JAdES üretim/doğrulama
-- `src/DigitalSignature.ASiC` → ASiC-S container üretim/doğrulama
-- `src/DigitalSignature.Validation` → format bağımsız validation engine
-- `tests/DigitalSignature.*.Tests` → format ve bileşen testleri
+```csharp
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using DigitalSignature.Abstractions;
+using DigitalSignature.CAdES;
+using DigitalSignature.Core;
 
-## Doğrulama yaklaşımı
+byte[] payload = "hello"u8.ToArray();
+using RSA rsa = RSA.Create(2048);
+var certificateRequest = new CertificateRequest(
+    "CN=DigitalSignature Demo",
+    rsa,
+    HashAlgorithmName.SHA256,
+    RSASignaturePadding.Pkcs1);
+using X509Certificate2 certificate = certificateRequest.CreateSelfSigned(
+    DateTimeOffset.UtcNow.AddDays(-1),
+    DateTimeOffset.UtcNow.AddYears(1));
 
-Projede her önemli değişiklik için şu sıra izlenir:
+var service = new CAdESBaselineBService();
+var request = new SignatureRequest(
+    SignatureFormat.CAdES,
+    SignatureLevel.BaselineB,
+    payload,
+    MimeType: "text/plain");
+var suite = new SignatureSuite(
+    SignatureAlgorithmIdentifier.RsaPkcs1,
+    HashAlgorithmIdentifier.Sha256,
+    2048,
+    IsRecommended: true);
 
-1. unit test
-2. runtime smoke test
-3. artifact generation
-4. ETSI checker validation
+var signature = service.CreateDetachedSignature(request, certificate, rsa, suite);
+var validation = service.VerifyDetachedSignature(payload, signature.Content.Span, certificate);
 
-Runtime artifact çıktıları yerelde şu klasörde üretilir:
+Console.WriteLine(validation.Conclusion);
+```
 
-- `artifacts/runtime-demo`
+## Proje yapısı
 
-## Takip dosyaları
+- `src/` -> kütüphane projeleri
+- `tests/` -> test projeleri
 
-- `ROADMAP.md` -> uzun vadeli teknik yön
-- `STATUS.md` -> güncel durum
-- `WORKFLOW.md` -> çalışma modeli ve doğrulama akışı
+## Not
 
+Bu repo aktif geliştirme altındadır.
+Özellikle JAdES-T tarafı henüz tamamlanmış değildir.
