@@ -1,99 +1,66 @@
 # DigitalSignature Status
 
-## Current mission
+## Current repository state
 
-Baseline-T rollout for the ETSI-facing formats in this order:
+- Active branch: `main`
+- Remote branch state: clean
+- Open PR requirement: none
+- Samples: local-only
+
+## Current format matrix
+
+| Format | Baseline-B | Baseline-T | Local | ETSI checker | Notes |
+|---|---|---:|---:|---:|---|
+| CAdES | Done | Done | Pass | Pass | `sample-cades-t.p7m` |
+| ASiC-S | Done | Done | Pass | Pass | `sample-asic-t.asics` |
+| PAdES | Done | Done | Pass | Pass | `sample-pades-t.pdf` |
+| XAdES | Done | Done | Pass | Pass | `sample-xades-t.xml` |
+| JAdES | Done | In progress / parked | Mixed | In progress | JAdES-T still needs serialization / verification alignment |
+
+## Current focus
+
+Primary completed set:
 
 1. CAdES-T
 2. ASiC-S-T
 3. PAdES-T
 4. XAdES-T
-5. JAdES-T
 
-Primary done criteria for each format:
+Current exception:
 
-- local tests pass
-- runtime artifact is produced
-- ETSI checker parses the artifact
-- T-related checks pass
-- no visible error / warning / failure regressions
+5. JAdES-T -> partially explored, currently parked until a cleaner signing / verification refactor is resumed
 
-## Layered operating model
+## What is true right now
 
-### Layer 1. Orchestration
+- `main` already contains the successful Baseline-T rollout except JAdES-T completion
+- no active feature branch is required at the moment
+- no active PR is required at the moment
+- GitHub branch state is already clean
 
-Owner: main agent session
+## JAdES-T note
 
-Responsibilities:
+JAdES-T is the only remaining major open item in the current T matrix.
 
-- choose sequence and scope
-- keep architecture coherent across formats
-- own branch / PR / merge decisions
-- decide when work is ready to move to the next format
+Known state:
 
-### Layer 2. Specialized execution
+- JAdES Baseline-B is working
+- ETSI checker can parse the JAdES-T shape under current experiments
+- timestamp structure and signature parsing were partially validated
+- remaining problem area is the final serialization / protected-header / verification alignment for a clean ETSI pass
 
-Used only for narrow tasks when it improves speed or confidence.
+## Recommended next checkpoint when resumed
 
-Examples:
-
-- ETSI checker behavior research
-- one-off standards lookup
-- isolated prototype for a single format problem
-
-Rule: shared code and final integration still come back through Layer 1.
-
-### Layer 3. Verification
-
-Every slice must clear these checkpoints:
-
-- format-specific unit tests
-- runtime smoke tests
-- runtime artifact generation under `artifacts/runtime-demo`
-- ETSI checker validation when applicable
-
-### Layer 4. Release / merge gate
-
-Policy:
-
-- work accumulates on `issue-baseline-t-suite`
-- merge to `main` only after a meaningful T block is complete
-- prefer fewer, larger, reviewable merges over many tiny merges to `main`
-
-## Active tracking
-
-- Active branch: `issue-baseline-t-suite`
-- Active PR: #29
-- Samples remain local-only
-- Current merge policy: hold on feature branch until the current T block is solid
-
-## Format matrix
-
-| Format | Baseline-B | Baseline-T | Local | ETSI checker | Notes |
-|---|---|---:|---:|---:|---|
-| CAdES | Done | Done | Pass | Pass | `sample-cades-t.p7m` |
-| ASiC-S | Done | Done | Pass | Pass | `sample-asic-t.asics` with inner timestamped CAdES |
-| PAdES | Done | Done | Pass | Pass | `sample-pades-t.pdf` |
-| XAdES | Done | Done | Pass | Pass | `sample-xades-t.xml` |
-| JAdES | Done | Queued | Pending | Pending | next active target |
-
-## Current focus
-
-- implement JAdES-T while preserving the checker-compatible general JSON serialization
-- keep existing B/T formats green while extending the suite
-
-## Next checkpoints
-
-1. JAdES-T local test and runtime artifact
-2. JAdES-T ETSI validation
-3. branch-wide regression pass across all T formats
-4. re-evaluate merge to `main`
+1. refactor JAdES-T signing and verification around real JSON serialization semantics
+2. restore local test green state
+3. regenerate runtime artifact
+4. rerun ETSI checker validation
+5. close JAdES-T only after clean pass
 
 ## Update rule
 
 Update this file whenever one of these happens:
 
 - a format changes state
-- a checker validation is completed
-- the active target changes
-- merge policy changes
+- checker validation completes
+- repo branch / PR policy changes
+- JAdES-T resumes or completes
