@@ -73,8 +73,3 @@ Runtime artifact çıktıları yerelde şu klasörde üretilir:
 - `STATUS.md` -> güncel durum
 - `WORKFLOW.md` -> çalışma modeli ve doğrulama akışı
 
-## Notlar
-
-- `samples/` local-only tutulur, GitHub’a push edilmez
-- proje interoperability-first yaklaşımıyla ilerler
-- ETSI checker sonuçları yapısal/conformance doğrulaması için güçlü sinyaldir
