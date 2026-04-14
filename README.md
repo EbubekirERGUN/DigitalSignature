@@ -14,3 +14,9 @@ dotnet restore DigitalSignature.slnx
 dotnet build DigitalSignature.slnx
 dotnet test DigitalSignature.slnx
 ```
+
+## Takip
+
+- `ROADMAP.md` -> uzun vadeli teknik yön
+- `STATUS.md` -> mevcut durum ve aktif hedef
+- `WORKFLOW.md` -> çalışma ve doğrulama modeli
