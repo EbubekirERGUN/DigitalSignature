@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
 using DigitalSignature.Abstractions;
 using DigitalSignature.Core;
@@ -46,6 +47,42 @@ public class ASiCSBaselineBServiceTests
         Assert.NotNull(archive.GetEntry("mimetype"));
         Assert.NotNull(archive.GetEntry("document.txt"));
         Assert.NotNull(archive.GetEntry("META-INF/signature.p7s"));
+    }
+
+    [Fact]
+    public async Task CreateContainer_ShouldProduceBaselineTArtifact_WhenTimestampIsProvided()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=ASiC Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=ASiC Test TSA");
+
+        var service = new DigitalSignature.ASiC.ASiCSBaselineBService();
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate, fixedTimestamp: DateTimeOffset.Parse("2026-04-13T20:30:00Z"));
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048, IsRecommended: true);
+        var payload = "Hello ASiC-T"u8.ToArray();
+        var baselineBRequest = new SignatureRequest(SignatureFormat.ASiC, SignatureLevel.BaselineB, payload, MimeType: "text/plain");
+
+        var signingTime = DateTimeOffset.Parse("2026-04-13T20:00:00Z");
+        var baselineBArtifact = service.CreateContainer(baselineBRequest, "document.txt", certificate, rsa, suite, signingTime);
+        var timestamp = await CreateTimestampForContainerSignatureAsync(baselineBArtifact.Container.Data, payload, timestampProvider);
+
+        var baselineTArtifact = service.CreateContainer(
+            baselineBRequest with { Level = SignatureLevel.BaselineT },
+            "document.txt",
+            certificate,
+            rsa,
+            suite,
+            signingTime,
+            signatureTimestamp: timestamp);
+
+        var verification = service.VerifyContainer(baselineTArtifact.Container.Data);
+
+        Assert.Equal(SignatureLevel.BaselineT, baselineTArtifact.Container.Level);
+        Assert.Equal(ValidationConclusion.Valid, verification.Validation.Conclusion);
+        Assert.NotNull(verification.Validation.Signature);
+        Assert.Equal(SignatureLevel.BaselineT, verification.Validation.Signature!.Level);
+        Assert.Single(verification.Validation.Signature.ValidationMaterial.Timestamps);
     }
 
     [Fact]
@@ -99,6 +136,40 @@ public class ASiCSBaselineBServiceTests
         Assert.Contains("root-level filename", exception.Message);
     }
 
+    private static async Task<TimestampMaterial> CreateTimestampForContainerSignatureAsync(
+        ReadOnlyMemory<byte> containerBytes,
+        ReadOnlyMemory<byte> payload,
+        ITimestampProvider timestampProvider)
+    {
+        using var archive = new ZipArchive(new MemoryStream(containerBytes.ToArray()), ZipArchiveMode.Read);
+        var signatureEntry = archive.GetEntry("META-INF/signature.p7s")!;
+        using var source = signatureEntry.Open();
+        using var ms = new MemoryStream();
+        await source.CopyToAsync(ms);
+
+        var signedCms = new SignedCms(new ContentInfo(payload.ToArray()), detached: true);
+        signedCms.Decode(ms.ToArray());
+        var timestampRequest = Rfc3161TimestampRequest.CreateFromSignerInfo(
+            signedCms.SignerInfos[0],
+            HashAlgorithmName.SHA256,
+            null,
+            null,
+            true,
+            null);
+
+        var response = await timestampProvider.GetTimestampAsync(
+            new TimestampRequest(
+                timestampRequest.GetMessageHash(),
+                timestampRequest.HashAlgorithmId.Value!,
+                timestampRequest.RequestedPolicyId?.Value,
+                timestampRequest.GetNonce() is { } nonce ? Convert.ToHexString(nonce.Span) : null,
+                timestampRequest.RequestSignerCertificate));
+
+        Assert.True(response.IsSuccess);
+        Assert.NotNull(response.Timestamp);
+        return response.Timestamp!;
+    }
+
     private static byte[] ReplaceSignature(byte[] containerWithPayload, byte[] containerWithDesiredSignature)
     {
         using var payloadArchive = new ZipArchive(new MemoryStream(containerWithPayload), ZipArchiveMode.Read);
@@ -136,6 +207,19 @@ public class ASiCSBaselineBServiceTests
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
         request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
         request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, false));
+
+        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+    }
+
+    private static X509Certificate2 CreateTsaCertificate(RSA rsa, string subjectName)
+    {
+        var request = new CertificateRequest(subjectName, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
+        request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.NonRepudiation, true));
+
+        var enhancedKeyUsages = new OidCollection { new("1.3.6.1.5.5.7.3.8") };
+        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(enhancedKeyUsages, true));
 
         return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
     }

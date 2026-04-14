@@ -64,12 +64,65 @@ public class XAdESBaselineBValidatorTests
         Assert.True(result.HasCanonicalizationMethod);
     }
 
+    [Fact]
+    public async Task ValidateAsync_ShouldReturnBaselineT_WhenSignatureTimestampIsPresentAndTrusted()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=XAdES Validation Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=XAdES Validation TSA");
+
+        var service = new XAdESBaselineBService(new ExclusiveXmlCanonicalizer());
+        var validator = new XAdESBaselineBValidator(
+            service,
+            new SignatureValidationEngine(
+                new StubCertificateChainValidator(certificate),
+                new StubTrustAnchorProvider(certificate)));
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate);
+
+        var request = new SignatureRequest(
+            SignatureFormat.XAdES,
+            SignatureLevel.BaselineB,
+            Encoding.UTF8.GetBytes("<Invoice Id=\"doc-3\"><Total>126</Total></Invoice>"),
+            MimeType: "application/xml");
+        var suite = new SignatureSuite(
+            SignatureAlgorithmIdentifier.RsaPkcs1,
+            HashAlgorithmIdentifier.Sha256,
+            2048);
+        var baselineBSignature = service.CreateEnvelopedSignature(request, certificate, rsa, suite);
+        var timestampResponse = await timestampProvider.GetTimestampAsync(
+            service.CreateSignatureTimestampRequest(
+                Encoding.UTF8.GetBytes(baselineBSignature.XmlDocument),
+                suite.HashAlgorithm));
+        var baselineTSignature = service.AttachSignatureTimestamp(baselineBSignature, timestampResponse.Timestamp!);
+
+        var result = await validator.ValidateAsync(
+            Encoding.UTF8.GetBytes(baselineTSignature.XmlDocument),
+            TemporalValidationContext.ForSigningTime(DateTimeOffset.UtcNow, null));
+
+        Assert.True(timestampResponse.IsSuccess);
+        Assert.Equal(ValidationConclusion.Valid, result.Validation.Conclusion);
+        Assert.NotNull(result.Validation.Signature);
+        Assert.Equal(SignatureLevel.BaselineT, result.Validation.Signature!.Level);
+        Assert.Single(result.Validation.Signature.ValidationMaterial.Timestamps);
+    }
+
     private static X509Certificate2 CreateSelfSignedCertificate(RSA rsa, string subjectName)
     {
         var request = new CertificateRequest(subjectName, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
         request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
         request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, false));
+        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+    }
+
+    private static X509Certificate2 CreateTsaCertificate(RSA rsa, string subjectName)
+    {
+        var request = new CertificateRequest(subjectName, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
+        request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.NonRepudiation, true));
+        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new("1.3.6.1.5.5.7.3.8") }, true));
         return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
     }
 

@@ -43,6 +43,44 @@ public class XAdESBaselineBServiceTests
     }
 
     [Fact]
+    public async Task AttachSignatureTimestamp_ShouldProduceBaselineTDescriptor_AndValidVerification()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=XAdES Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=XAdES Test TSA");
+
+        var service = new XAdESBaselineBService(new ExclusiveXmlCanonicalizer());
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate);
+        var request = new SignatureRequest(
+            SignatureFormat.XAdES,
+            SignatureLevel.BaselineB,
+            Encoding.UTF8.GetBytes("<Invoice Id=\"doc-2\"><Total>84</Total></Invoice>"),
+            MimeType: "application/xml");
+        var suite = new SignatureSuite(
+            SignatureAlgorithmIdentifier.RsaPkcs1,
+            HashAlgorithmIdentifier.Sha256,
+            2048,
+            IsRecommended: true);
+
+        var baselineBSignature = service.CreateEnvelopedSignature(request, certificate, rsa, suite, DateTimeOffset.Parse("2026-04-13T11:30:00Z"));
+        var timestampRequest = service.CreateSignatureTimestampRequest(
+            Encoding.UTF8.GetBytes(baselineBSignature.XmlDocument),
+            suite.HashAlgorithm);
+        var timestampResponse = await timestampProvider.GetTimestampAsync(timestampRequest);
+        var baselineTSignature = service.AttachSignatureTimestamp(baselineBSignature, timestampResponse.Timestamp!);
+        var descriptor = service.ReadSignature(Encoding.UTF8.GetBytes(baselineTSignature.XmlDocument));
+        var validation = service.VerifyEnvelopedSignature(Encoding.UTF8.GetBytes(baselineTSignature.XmlDocument));
+
+        Assert.True(timestampResponse.IsSuccess);
+        Assert.Contains("SignatureTimeStamp", baselineTSignature.XmlDocument);
+        Assert.Contains("EncapsulatedTimeStamp", baselineTSignature.XmlDocument);
+        Assert.Equal(SignatureLevel.BaselineT, descriptor.Level);
+        Assert.Single(descriptor.ValidationMaterial.Timestamps);
+        Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
+    }
+
+    [Fact]
     public void VerifyEnvelopedSignature_ShouldFail_WhenSignedPropertiesReferenceIsMissing()
     {
         var service = new XAdESBaselineBService(new ExclusiveXmlCanonicalizer());
@@ -65,6 +103,22 @@ public class XAdESBaselineBServiceTests
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
         request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
         request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, false));
+
+        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+    }
+
+    private static X509Certificate2 CreateTsaCertificate(RSA rsa, string subjectName)
+    {
+        var request = new CertificateRequest(
+            subjectName,
+            rsa,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
+
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
+        request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.NonRepudiation, true));
+        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new("1.3.6.1.5.5.7.3.8") }, true));
 
         return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
     }
