@@ -63,7 +63,8 @@ public class ASiCSBaselineBServiceTests
         var payload = "Hello ASiC-T"u8.ToArray();
         var baselineBRequest = new SignatureRequest(SignatureFormat.ASiC, SignatureLevel.BaselineB, payload, MimeType: "text/plain");
 
-        var baselineBArtifact = service.CreateContainer(baselineBRequest, "document.txt", certificate, rsa, suite);
+        var signingTime = DateTimeOffset.Parse("2026-04-13T20:00:00Z");
+        var baselineBArtifact = service.CreateContainer(baselineBRequest, "document.txt", certificate, rsa, suite, signingTime);
         var timestamp = await CreateTimestampForContainerSignatureAsync(baselineBArtifact.Container.Data, payload, timestampProvider);
 
         var baselineTArtifact = service.CreateContainer(
@@ -72,6 +73,7 @@ public class ASiCSBaselineBServiceTests
             certificate,
             rsa,
             suite,
+            signingTime,
             signatureTimestamp: timestamp);
 
         var verification = service.VerifyContainer(baselineTArtifact.Container.Data);

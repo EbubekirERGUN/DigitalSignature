@@ -69,7 +69,8 @@ public class CAdESBaselineBServiceTests
             MimeType: "text/plain",
             ContentTypeHint: "detached");
 
-        var baselineBArtifact = service.CreateDetachedSignature(baselineBRequest, certificate, rsa, suite);
+        var signingTime = DateTimeOffset.Parse("2026-04-13T18:30:00Z");
+        var baselineBArtifact = service.CreateDetachedSignature(baselineBRequest, certificate, rsa, suite, signingTime);
         var timestampMaterial = await CreateTimestampForSignatureAsync(baselineBArtifact.Data, baselineBRequest.Payload, timestampProvider);
 
         var timestampedArtifact = service.CreateDetachedSignature(
@@ -77,6 +78,7 @@ public class CAdESBaselineBServiceTests
             certificate,
             rsa,
             suite,
+            signingTime,
             signatureTimestamp: timestampMaterial);
 
         var descriptor = service.ReadSignature(timestampedArtifact.Data);
@@ -101,9 +103,10 @@ public class CAdESBaselineBServiceTests
         var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048);
         var request = new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, "payload"u8.ToArray());
 
-        var baselineBArtifact = service.CreateDetachedSignature(request, certificate, rsa, suite);
+        var signingTime = DateTimeOffset.Parse("2026-04-13T19:00:00Z");
+        var baselineBArtifact = service.CreateDetachedSignature(request, certificate, rsa, suite, signingTime);
         var timestampMaterial = await CreateTimestampForSignatureAsync(baselineBArtifact.Data, request.Payload, timestampProvider);
-        var baselineTArtifact = service.CreateDetachedSignature(request with { Level = SignatureLevel.BaselineT }, certificate, rsa, suite, signatureTimestamp: timestampMaterial);
+        var baselineTArtifact = service.CreateDetachedSignature(request with { Level = SignatureLevel.BaselineT }, certificate, rsa, suite, signingTime, signatureTimestamp: timestampMaterial);
 
         var corrupted = baselineTArtifact.Data.ToArray();
         corrupted[^32] ^= 0xFF;

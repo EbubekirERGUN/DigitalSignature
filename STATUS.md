@@ -74,19 +74,19 @@ Policy:
 | CAdES | Done | Done | Pass | Pass | `sample-cades-t.p7m` |
 | ASiC-S | Done | Done | Pass | Pass | `sample-asic-t.asics` with inner timestamped CAdES |
 | PAdES | Done | Done | Pass | Pass | `sample-pades-t.pdf` |
-| XAdES | Done | In progress | Pending | Pending | next active target |
-| JAdES | Done | Queued | Pending | Pending | after XAdES-T |
+| XAdES | Done | Done | Pass | Pass | `sample-xades-t.xml` |
+| JAdES | Done | Queued | Pending | Pending | next active target |
 
 ## Current focus
 
-- implement XAdES-T via `UnsignedProperties/SignatureTimeStamp`
+- implement JAdES-T while preserving the checker-compatible general JSON serialization
 - keep existing B/T formats green while extending the suite
 
 ## Next checkpoints
 
-1. XAdES-T local test and runtime artifact
-2. XAdES-T ETSI validation
-3. JAdES-T implementation and checker validation
+1. JAdES-T local test and runtime artifact
+2. JAdES-T ETSI validation
+3. branch-wide regression pass across all T formats
 4. re-evaluate merge to `main`
 
 ## Update rule

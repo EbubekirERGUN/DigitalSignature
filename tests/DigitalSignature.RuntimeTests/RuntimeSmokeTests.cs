@@ -37,7 +37,8 @@ public class RuntimeSmokeTests
         var service = new ASiCSBaselineBService();
         var baselineBRequest = new SignatureRequest(SignatureFormat.ASiC, SignatureLevel.BaselineB, RuntimeSmokeFixtures.AsicPayload);
 
-        var baselineBArtifact = service.CreateContainer(baselineBRequest, "runtime.txt", material.Certificate, material.Key, material.Suite);
+        var signingTime = DateTimeOffset.Parse("2026-04-14T08:00:00Z");
+        var baselineBArtifact = service.CreateContainer(baselineBRequest, "runtime.txt", material.Certificate, material.Key, material.Suite, signingTime);
         var timestampMaterial = await CreateTimestampForDetachedSignatureInsideContainerAsync(
             baselineBArtifact.Container.Data,
             baselineBRequest.Payload,
@@ -49,6 +50,7 @@ public class RuntimeSmokeTests
             material.Certificate,
             material.Key,
             material.Suite,
+            signingTime,
             signatureTimestamp: timestampMaterial);
         var verification = service.VerifyContainer(baselineTArtifact.Container.Data);
 
@@ -79,13 +81,15 @@ public class RuntimeSmokeTests
         var service = new CAdESBaselineBService();
         var baselineBRequest = new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, RuntimeSmokeFixtures.CadesPayload);
 
-        var baselineBArtifact = service.CreateAttachedSignature(baselineBRequest, material.Certificate, material.Key, material.Suite);
+        var signingTime = DateTimeOffset.Parse("2026-04-14T08:05:00Z");
+        var baselineBArtifact = service.CreateAttachedSignature(baselineBRequest, material.Certificate, material.Key, material.Suite, signingTime);
         var timestampMaterial = await CreateTimestampForAttachedSignatureAsync(baselineBArtifact.Data, material.TimestampProvider);
         var baselineTArtifact = service.CreateAttachedSignature(
             baselineBRequest with { Level = SignatureLevel.BaselineT },
             material.Certificate,
             material.Key,
             material.Suite,
+            signingTime,
             signatureTimestamp: timestampMaterial);
         var verification = service.VerifyAttachedSignature(baselineTArtifact.Data);
         var descriptor = service.ReadSignature(baselineTArtifact.Data);
@@ -96,17 +100,27 @@ public class RuntimeSmokeTests
     }
 
     [Fact]
-    public void XAdES_RuntimeSmoke_ShouldCreateAndVerifyEnvelopedSignature()
+    public async Task XAdES_RuntimeSmoke_ShouldCreateAndVerifyBaselineTEnvelopedSignature()
     {
         using var material = new RuntimeMaterial();
         var service = new XAdESBaselineBService(new ExclusiveXmlCanonicalizer());
-        var request = new SignatureRequest(SignatureFormat.XAdES, SignatureLevel.BaselineB, RuntimeSmokeFixtures.XadesPayload);
+        var request = new SignatureRequest(SignatureFormat.XAdES, SignatureLevel.BaselineB, RuntimeSmokeFixtures.XadesPayload, MimeType: "application/xml");
 
-        var artifact = service.CreateEnvelopedSignature(request, material.Certificate, material.Key, material.Suite);
-        var verification = service.VerifyEnvelopedSignature(System.Text.Encoding.UTF8.GetBytes(artifact.XmlDocument));
+        var baselineBArtifact = service.CreateEnvelopedSignature(request, material.Certificate, material.Key, material.Suite);
+        var timestampResponse = await material.TimestampProvider.GetTimestampAsync(
+            service.CreateSignatureTimestampRequest(
+                System.Text.Encoding.UTF8.GetBytes(baselineBArtifact.XmlDocument),
+                material.Suite.HashAlgorithm));
+        var baselineTArtifact = service.AttachSignatureTimestamp(baselineBArtifact, timestampResponse.Timestamp!);
+        var verification = service.VerifyEnvelopedSignature(System.Text.Encoding.UTF8.GetBytes(baselineTArtifact.XmlDocument));
+        var descriptor = service.ReadSignature(System.Text.Encoding.UTF8.GetBytes(baselineTArtifact.XmlDocument));
 
+        Assert.True(timestampResponse.IsSuccess);
         Assert.Equal(ValidationConclusion.Valid, verification.Conclusion);
-        Assert.Contains("SignedProperties", artifact.XmlDocument);
+        Assert.Contains("SignedProperties", baselineTArtifact.XmlDocument);
+        Assert.Contains("SignatureTimeStamp", baselineTArtifact.XmlDocument);
+        Assert.Equal(SignatureLevel.BaselineT, descriptor.Level);
+        Assert.Single(descriptor.ValidationMaterial.Timestamps);
     }
 
     [Fact]
@@ -148,16 +162,19 @@ public class RuntimeSmokeTests
         var cadesService = new CAdESBaselineBService();
         var binding = service.PrepareDetachedSignaturePlaceholder(RuntimeSmokeFixtures.PadesPayload, 8192);
         var prepared = service.PrepareDetachedSignatureInput(binding);
+        var signingTime = DateTimeOffset.Parse("2026-04-14T08:10:00Z");
         var baselineBSignature = cadesService.CreateDetachedSignature(
             new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, prepared.SignedBytes),
             material.Certificate,
             material.Key,
-            material.Suite);
+            material.Suite,
+            signingTime);
         var baselineTSignature = cadesService.CreateDetachedSignature(
             new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineT, prepared.SignedBytes),
             material.Certificate,
             material.Key,
             material.Suite,
+            signingTime,
             signatureTimestamp: await CreateTimestampForDetachedCmsAsync(prepared.SignedBytes, baselineBSignature.Data, material.TimestampProvider));
         var signed = service.ApplyDetachedSignature(prepared, baselineTSignature.Data);
         var verification = verifier.Verify(signed);
