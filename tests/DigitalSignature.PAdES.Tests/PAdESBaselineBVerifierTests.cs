@@ -6,6 +6,9 @@ using DigitalSignature.Abstractions;
 using DigitalSignature.CAdES;
 using DigitalSignature.Core;
 using DigitalSignature.PAdES;
+using Org.BouncyCastle.Crypto.Operators;
+using Org.BouncyCastle.Security;
+using Org.BouncyCastle.X509;
 
 namespace DigitalSignature.PAdES.Tests;
 
@@ -75,6 +78,53 @@ public class PAdESBaselineBVerifierTests
     }
 
     [Fact]
+    public async Task Verify_ShouldReadBaselineLTLevel_FromPdfDss()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=PAdES Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=PAdES Test TSA");
+
+        var padesService = new PAdESBaselineBService();
+        var verifier = new PAdESBaselineBVerifier();
+        var cadesService = new CAdESBaselineBService();
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate, fixedTimestamp: DateTimeOffset.UtcNow.AddMinutes(-5));
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048, IsRecommended: true);
+        var pdf = Encoding.ASCII.GetBytes("%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF");
+
+        var binding = padesService.PrepareDetachedSignaturePlaceholder(pdf, 8192);
+        var prepared = padesService.PrepareDetachedSignatureInput(binding);
+        var signingTime = DateTimeOffset.UtcNow.AddMinutes(-10);
+        var baselineBSignature = cadesService.CreateDetachedSignature(new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, prepared.SignedBytes), certificate, rsa, suite, signingTime);
+        var timestamp = await CreateTimestampForSignerInfoAsync(prepared.SignedBytes, baselineBSignature.Data, timestampProvider);
+        var baselineTSignature = cadesService.CreateDetachedSignature(
+            new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineT, prepared.SignedBytes),
+            certificate,
+            rsa,
+            suite,
+            signingTime,
+            signatureTimestamp: timestamp);
+        var baselineTPdf = padesService.ApplyDetachedSignature(prepared, baselineTSignature.Data);
+        var baselineLtPdf = padesService.AugmentToBaselineLT(
+            baselineTPdf,
+            [
+                CreateCrlRevocationInfo(certificate, rsa, DateTimeOffset.UtcNow.AddMinutes(-8)),
+                CreateCrlRevocationInfo(tsaCertificate, tsaKey, DateTimeOffset.UtcNow.AddMinutes(-7))
+            ],
+            [certificate, tsaCertificate]);
+
+        var result = verifier.Verify(baselineLtPdf);
+
+        Assert.Equal(ValidationConclusion.Valid, result.Validation.Conclusion);
+        Assert.True(result.HasDetachedCAdESSignature);
+        Assert.NotNull(result.Validation.Signature);
+        Assert.Equal(SignatureLevel.BaselineLT, result.Validation.Signature!.Level);
+        Assert.NotEmpty(result.Validation.Signature.ValidationMaterial.CertificateValues);
+        Assert.NotEmpty(result.Validation.Signature.ValidationMaterial.RevocationValues);
+        Assert.NotEmpty(result.Validation.Signature.ValidationMaterial.RevocationInfo);
+    }
+
+    [Fact]
     public void Verify_ShouldFail_WhenPdfDoesNotContainSignaturePlaceholder()
     {
         var verifier = new PAdESBaselineBVerifier();
@@ -112,6 +162,28 @@ public class PAdESBaselineBVerifierTests
         Assert.True(response.IsSuccess);
         Assert.NotNull(response.Timestamp);
         return response.Timestamp!;
+    }
+
+    private static RevocationInfo CreateCrlRevocationInfo(
+        X509Certificate2 certificate,
+        RSA issuerKey,
+        DateTimeOffset thisUpdate)
+    {
+        var generator = new X509V2CrlGenerator();
+        generator.SetIssuerDN(DotNetUtilities.FromX509Certificate(certificate).SubjectDN);
+        generator.SetThisUpdate(thisUpdate.UtcDateTime);
+        generator.SetNextUpdate(thisUpdate.AddDays(7).UtcDateTime);
+
+        var crl = generator.Generate(new Asn1SignatureFactory("SHA256WITHRSA", DotNetUtilities.GetRsaKeyPair(issuerKey).Private));
+        return new RevocationInfo(
+            "CRL",
+            thisUpdate,
+            thisUpdate.AddDays(7),
+            false,
+            null)
+        {
+            EncodedValue = crl.GetEncoded()
+        };
     }
 
     private static X509Certificate2 CreateSelfSignedCertificate(RSA rsa, string subjectName)

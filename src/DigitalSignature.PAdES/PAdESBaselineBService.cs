@@ -1,10 +1,18 @@
+using System.Security.Cryptography.Pkcs;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using DigitalSignature.Abstractions;
+using DigitalSignature.CAdES;
+using DigitalSignature.Core;
+using Org.BouncyCastle.Cms;
+using Org.BouncyCastle.Tsp;
 
 namespace DigitalSignature.PAdES;
 
 public sealed class PAdESBaselineBService
 {
+    private readonly CAdESBaselineBService _cadesService = new();
+
     public PdfSignatureBindingResult PrepareDetachedSignaturePlaceholder(
         ReadOnlyMemory<byte> pdfDocument,
         int estimatedContentsHexLength = 16384)
@@ -83,6 +91,43 @@ public sealed class PAdESBaselineBService
         ReadOnlyMemory<byte> detachedCmsSignature)
         => ApplyDetachedSignature(PrepareDetachedSignatureInput(binding), detachedCmsSignature);
 
+    public ReadOnlyMemory<byte> AugmentToBaselineLT(
+        ReadOnlyMemory<byte> signedPdf,
+        IReadOnlyList<RevocationInfo> revocationInfo,
+        IReadOnlyList<X509Certificate2>? validationCertificates = null)
+    {
+        var text = PdfDetachedSignatureLocator.Render(signedPdf);
+        var placeholder = PdfDetachedSignatureLocator.TryLocatePlaceholder(text)
+            ?? throw new InvalidOperationException("PDF signature placeholder was not found.");
+
+        if (!PdfDetachedSignatureLocator.HasDetachedCadesSubFilter(text))
+        {
+            throw new InvalidOperationException("PDF signature dictionary does not declare ETSI.CAdES.detached subfilter.");
+        }
+
+        var detachedCmsSignature = PdfDetachedSignatureLocator.TryExtractCmsSignature(text, placeholder);
+        if (detachedCmsSignature.IsEmpty)
+        {
+            throw new InvalidOperationException("Detached CMS signature could not be extracted from the PDF contents placeholder.");
+        }
+
+        var cadesDescriptor = _cadesService.ReadSignature(detachedCmsSignature);
+        if (cadesDescriptor.Level < SignatureLevel.BaselineT)
+        {
+            throw new InvalidOperationException("PAdES Baseline-LT augmentation requires an existing Baseline-T detached CAdES signature.");
+        }
+
+        var certificateValues = CollectCertificateValues(detachedCmsSignature, cadesDescriptor.ValidationMaterial, validationCertificates);
+        var (crlValues, ocspValues) = CollectRevocationValues(revocationInfo, cadesDescriptor.ValidationMaterial.RevocationValues);
+
+        return PdfDocumentSecurityStoreBuilder.Embed(
+            signedPdf,
+            detachedCmsSignature,
+            certificateValues,
+            crlValues,
+            ocspValues);
+    }
+
     private static bool LooksLikeMinimalPdf(ReadOnlySpan<byte> pdfDocument)
     {
         var text = Encoding.ASCII.GetString(pdfDocument);
@@ -99,5 +144,105 @@ public sealed class PAdESBaselineBService
             ValidationMaterial.Empty,
             SignatureAlgorithm: null,
             DigestAlgorithm: null);
+    }
+
+    private static IReadOnlyList<ReadOnlyMemory<byte>> CollectCertificateValues(
+        ReadOnlyMemory<byte> detachedCmsSignature,
+        ValidationMaterial validationMaterial,
+        IReadOnlyList<X509Certificate2>? validationCertificates)
+    {
+        var values = new List<ReadOnlyMemory<byte>>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        void AddValue(ReadOnlyMemory<byte> value)
+        {
+            if (value.IsEmpty)
+            {
+                return;
+            }
+
+            if (seen.Add(Convert.ToBase64String(value.Span)))
+            {
+                values.Add(value);
+            }
+        }
+
+        var signedCms = new SignedCms();
+        signedCms.Decode(detachedCmsSignature.ToArray());
+        foreach (var certificate in signedCms.Certificates)
+        {
+            AddValue(certificate.RawData);
+        }
+
+        foreach (var value in validationMaterial.CertificateValues)
+        {
+            AddValue(value);
+        }
+
+        if (validationCertificates is not null)
+        {
+            foreach (var certificate in validationCertificates)
+            {
+                AddValue(certificate.RawData);
+            }
+        }
+
+        foreach (var timestamp in validationMaterial.Timestamps)
+        {
+            var token = new TimeStampToken(new CmsSignedData(timestamp.Token.ToArray()));
+            foreach (var certificate in token.GetCertificates().EnumerateMatches(null))
+            {
+                AddValue(certificate.GetEncoded());
+            }
+        }
+
+        return values;
+    }
+
+    private static (IReadOnlyList<ReadOnlyMemory<byte>> CrlValues, IReadOnlyList<ReadOnlyMemory<byte>> OcspValues) CollectRevocationValues(
+        IReadOnlyList<RevocationInfo> revocationInfo,
+        IReadOnlyList<ReadOnlyMemory<byte>> validationRevocationValues)
+    {
+        var crlValues = new List<ReadOnlyMemory<byte>>();
+        var ocspValues = new List<ReadOnlyMemory<byte>>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        void AddValue(ReadOnlyMemory<byte> value, bool isCrl)
+        {
+            if (value.IsEmpty)
+            {
+                return;
+            }
+
+            if (!seen.Add(Convert.ToBase64String(value.Span)))
+            {
+                return;
+            }
+
+            if (isCrl)
+            {
+                crlValues.Add(value);
+                return;
+            }
+
+            ocspValues.Add(value);
+        }
+
+        foreach (var info in revocationInfo)
+        {
+            if (info.EncodedValue.IsEmpty)
+            {
+                continue;
+            }
+
+            AddValue(info.EncodedValue, info.Source.Contains("CRL", StringComparison.OrdinalIgnoreCase));
+        }
+
+        foreach (var value in validationRevocationValues)
+        {
+            AddValue(value, isCrl: true);
+        }
+
+        return (crlValues, ocspValues);
     }
 }
