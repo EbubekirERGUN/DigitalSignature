@@ -32,10 +32,11 @@ public sealed class CAdESBaselineBService
         DateTimeOffset? signingTime = null,
         TimestampMaterial? signatureTimestamp = null,
         IReadOnlyList<X509Certificate2>? validationCertificates = null,
-        IReadOnlyList<RevocationInfo>? revocationInfo = null)
+        IReadOnlyList<RevocationInfo>? revocationInfo = null,
+        bool includeSigningTime = true)
     {
         ValidateSigningInputs(request, signingCertificate, privateKey, suite);
-        return CreateSignature(request, signingCertificate, privateKey, suite, detached: true, signingTime, signatureTimestamp, validationCertificates, revocationInfo);
+        return CreateSignature(request, signingCertificate, privateKey, suite, detached: true, signingTime, signatureTimestamp, validationCertificates, revocationInfo, includeSigningTime);
     }
 
     public SignatureArtifact CreateAttachedSignature(
@@ -46,10 +47,11 @@ public sealed class CAdESBaselineBService
         DateTimeOffset? signingTime = null,
         TimestampMaterial? signatureTimestamp = null,
         IReadOnlyList<X509Certificate2>? validationCertificates = null,
-        IReadOnlyList<RevocationInfo>? revocationInfo = null)
+        IReadOnlyList<RevocationInfo>? revocationInfo = null,
+        bool includeSigningTime = true)
     {
         ValidateSigningInputs(request, signingCertificate, privateKey, suite);
-        return CreateSignature(request, signingCertificate, privateKey, suite, detached: false, signingTime, signatureTimestamp, validationCertificates, revocationInfo);
+        return CreateSignature(request, signingCertificate, privateKey, suite, detached: false, signingTime, signatureTimestamp, validationCertificates, revocationInfo, includeSigningTime);
     }
 
     public SignatureDescriptor ReadSignature(ReadOnlyMemory<byte> signature)
@@ -168,7 +170,8 @@ public sealed class CAdESBaselineBService
         DateTimeOffset? signingTime,
         TimestampMaterial? signatureTimestamp,
         IReadOnlyList<X509Certificate2>? validationCertificates,
-        IReadOnlyList<RevocationInfo>? revocationInfo)
+        IReadOnlyList<RevocationInfo>? revocationInfo,
+        bool includeSigningTime)
     {
         EnsureSupportedLevel(request.Level);
 
@@ -191,7 +194,11 @@ public sealed class CAdESBaselineBService
             DigestAlgorithm = new Oid(GetDigestOid(suite.HashAlgorithm))
         };
 
-        signer.SignedAttributes.Add(new Pkcs9SigningTime((signingTime ?? DateTimeOffset.UtcNow).UtcDateTime));
+        if (includeSigningTime)
+        {
+            signer.SignedAttributes.Add(new Pkcs9SigningTime((signingTime ?? DateTimeOffset.UtcNow).UtcDateTime));
+        }
+
         signer.SignedAttributes.Add(CreateSigningCertificateV2Attribute(signingCertificate, suite.HashAlgorithm));
 
         signedCms.ComputeSignature(signer, silent: true);

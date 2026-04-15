@@ -31,7 +31,7 @@ internal static class PdfDetachedSignatureLocator
         return new PdfSignaturePlaceholder(contentsOffset, contentsLength, byteRange);
     }
 
-    public static ReadOnlyMemory<byte> TryExtractCmsSignature(string text, PdfSignaturePlaceholder placeholder)
+    public static ReadOnlyMemory<byte> TryExtractRawContentsBytes(string text, PdfSignaturePlaceholder placeholder)
     {
         var hexSignature = text.Substring(placeholder.ContentsOffset, placeholder.ContentsLength);
         if (string.IsNullOrWhiteSpace(hexSignature) || hexSignature.Length < 2)
@@ -46,16 +46,29 @@ internal static class PdfDetachedSignatureLocator
 
         try
         {
-            var raw = Convert.FromHexString(hexSignature);
-            if (AsnDecoder.TryReadEncodedValue(raw, AsnEncodingRules.BER, out _, out _, out _, out var bytesConsumed) && bytesConsumed > 0)
-            {
-                return raw.AsMemory(0, bytesConsumed);
-            }
-
-            return ReadOnlyMemory<byte>.Empty;
+            return Convert.FromHexString(hexSignature);
         }
         catch (FormatException)
         {
+            return ReadOnlyMemory<byte>.Empty;
+        }
+    }
+
+    public static ReadOnlyMemory<byte> TryExtractCmsSignature(string text, PdfSignaturePlaceholder placeholder)
+    {
+        try
+        {
+            var raw = TryExtractRawContentsBytes(text, placeholder);
+            if (raw.IsEmpty)
+            {
+                return ReadOnlyMemory<byte>.Empty;
+            }
+
+            if (AsnDecoder.TryReadEncodedValue(raw.Span, AsnEncodingRules.BER, out _, out _, out _, out var bytesConsumed) && bytesConsumed > 0)
+            {
+                return raw[..bytesConsumed];
+            }
+
             return ReadOnlyMemory<byte>.Empty;
         }
         catch (AsnContentException)

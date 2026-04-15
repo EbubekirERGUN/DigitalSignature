@@ -332,14 +332,16 @@ public class RuntimeSmokeTests
             material.Certificate,
             material.Key,
             material.Suite,
-            signingTime);
+            signingTime,
+            includeSigningTime: false);
         var baselineTSignature = cadesService.CreateDetachedSignature(
             new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineT, prepared.SignedBytes),
             material.Certificate,
             material.Key,
             material.Suite,
             signingTime,
-            signatureTimestamp: await CreateTimestampForDetachedCmsAsync(prepared.SignedBytes, baselineBSignature.Data, material.TimestampProvider));
+            signatureTimestamp: await CreateTimestampForDetachedCmsAsync(prepared.SignedBytes, baselineBSignature.Data, material.TimestampProvider),
+            includeSigningTime: false);
         var signed = service.ApplyDetachedSignature(prepared, baselineTSignature.Data);
         var verification = verifier.Verify(signed);
 
@@ -364,14 +366,16 @@ public class RuntimeSmokeTests
             material.Certificate,
             material.Key,
             material.Suite,
-            signingTime);
+            signingTime,
+            includeSigningTime: false);
         var baselineTSignature = cadesService.CreateDetachedSignature(
             new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineT, prepared.SignedBytes),
             material.Certificate,
             material.Key,
             material.Suite,
             signingTime,
-            signatureTimestamp: await CreateTimestampForDetachedCmsAsync(prepared.SignedBytes, baselineBSignature.Data, material.TimestampProvider));
+            signatureTimestamp: await CreateTimestampForDetachedCmsAsync(prepared.SignedBytes, baselineBSignature.Data, material.TimestampProvider),
+            includeSigningTime: false);
         var baselineTPdf = service.ApplyDetachedSignature(prepared, baselineTSignature.Data);
         var baselineLtPdf = service.AugmentToBaselineLT(
             baselineTPdf,

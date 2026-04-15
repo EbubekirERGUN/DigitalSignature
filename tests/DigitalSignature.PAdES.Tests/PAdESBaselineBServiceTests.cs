@@ -78,7 +78,8 @@ public class PAdESBaselineBServiceTests
             certificate,
             rsa,
             suite,
-            signingTime);
+            signingTime,
+            includeSigningTime: false);
         var timestamp = await CreateTimestampForSignerInfoAsync(prepared.SignedBytes, baselineBSignature.Data, timestampProvider);
         var baselineTSignature = cadesService.CreateDetachedSignature(
             new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineT, prepared.SignedBytes),
@@ -86,7 +87,8 @@ public class PAdESBaselineBServiceTests
             rsa,
             suite,
             signingTime,
-            signatureTimestamp: timestamp);
+            signatureTimestamp: timestamp,
+            includeSigningTime: false);
         var signedPdf = service.ApplyDetachedSignature(prepared, baselineTSignature.Data);
 
         var baselineLtPdf = service.AugmentToBaselineLT(
@@ -98,11 +100,19 @@ public class PAdESBaselineBServiceTests
             [certificate, tsaCertificate]);
 
         var rendered = Encoding.Latin1.GetString(baselineLtPdf.Span);
+        var contentsStart = rendered.IndexOf("/Contents <", StringComparison.Ordinal);
+        Assert.True(contentsStart >= 0);
+        var hexStart = contentsStart + "/Contents <".Length;
+        var hexEnd = rendered.IndexOf('>', hexStart);
+        Assert.True(hexEnd > hexStart);
+        var rawContentsBytes = Convert.FromHexString(rendered.Substring(hexStart, hexEnd - hexStart));
+        var expectedVriKey = Convert.ToHexString(SHA1.HashData(rawContentsBytes));
 
         Assert.Contains("/DSS", rendered);
         Assert.Contains("/VRI", rendered);
         Assert.Contains("/Certs", rendered);
         Assert.Contains("/CRLs", rendered);
+        Assert.Contains($"/{expectedVriKey}", rendered);
     }
 
     private static async Task<TimestampMaterial> CreateTimestampForSignerInfoAsync(

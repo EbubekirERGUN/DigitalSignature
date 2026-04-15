@@ -27,7 +27,7 @@ public class PAdESBaselineBVerifierTests
         var pdf = Encoding.ASCII.GetBytes("%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF");
         var binding = service.PrepareDetachedSignaturePlaceholder(pdf, 8192);
         var prepared = service.PrepareDetachedSignatureInput(binding);
-        var cms = cadesService.CreateDetachedSignature(new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, prepared.SignedBytes), certificate, rsa, suite);
+        var cms = cadesService.CreateDetachedSignature(new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, prepared.SignedBytes), certificate, rsa, suite, includeSigningTime: false);
         var signed = service.ApplyDetachedSignature(prepared, cms.Data);
 
         var result = verifier.Verify(signed);
@@ -57,7 +57,7 @@ public class PAdESBaselineBVerifierTests
         var binding = padesService.PrepareDetachedSignaturePlaceholder(pdf, 8192);
         var prepared = padesService.PrepareDetachedSignatureInput(binding);
         var signingTime = DateTimeOffset.Parse("2026-04-13T20:15:00Z");
-        var baselineBSignature = cadesService.CreateDetachedSignature(new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, prepared.SignedBytes), certificate, rsa, suite, signingTime);
+        var baselineBSignature = cadesService.CreateDetachedSignature(new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, prepared.SignedBytes), certificate, rsa, suite, signingTime, includeSigningTime: false);
         var timestamp = await CreateTimestampForSignerInfoAsync(prepared.SignedBytes, baselineBSignature.Data, timestampProvider);
         var baselineTSignature = cadesService.CreateDetachedSignature(
             new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineT, prepared.SignedBytes),
@@ -65,7 +65,8 @@ public class PAdESBaselineBVerifierTests
             rsa,
             suite,
             signingTime,
-            signatureTimestamp: timestamp);
+            signatureTimestamp: timestamp,
+            includeSigningTime: false);
         var signedPdf = padesService.ApplyDetachedSignature(prepared, baselineTSignature.Data);
 
         var result = verifier.Verify(signedPdf);
@@ -95,7 +96,7 @@ public class PAdESBaselineBVerifierTests
         var binding = padesService.PrepareDetachedSignaturePlaceholder(pdf, 8192);
         var prepared = padesService.PrepareDetachedSignatureInput(binding);
         var signingTime = DateTimeOffset.UtcNow.AddMinutes(-10);
-        var baselineBSignature = cadesService.CreateDetachedSignature(new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, prepared.SignedBytes), certificate, rsa, suite, signingTime);
+        var baselineBSignature = cadesService.CreateDetachedSignature(new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, prepared.SignedBytes), certificate, rsa, suite, signingTime, includeSigningTime: false);
         var timestamp = await CreateTimestampForSignerInfoAsync(prepared.SignedBytes, baselineBSignature.Data, timestampProvider);
         var baselineTSignature = cadesService.CreateDetachedSignature(
             new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineT, prepared.SignedBytes),
@@ -103,7 +104,8 @@ public class PAdESBaselineBVerifierTests
             rsa,
             suite,
             signingTime,
-            signatureTimestamp: timestamp);
+            signatureTimestamp: timestamp,
+            includeSigningTime: false);
         var baselineTPdf = padesService.ApplyDetachedSignature(prepared, baselineTSignature.Data);
         var baselineLtPdf = padesService.AugmentToBaselineLT(
             baselineTPdf,

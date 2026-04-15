@@ -34,6 +34,14 @@ internal static class PdfDocumentSecurityStoreBuilder
         }
 
         var text = PdfDetachedSignatureLocator.Render(signedPdf);
+        var placeholder = PdfDetachedSignatureLocator.TryLocatePlaceholder(text)
+            ?? throw new InvalidOperationException("PDF signature placeholder could not be located for DSS/VRI embedding.");
+        var signatureContentsBytes = PdfDetachedSignatureLocator.TryExtractRawContentsBytes(text, placeholder);
+        if (signatureContentsBytes.IsEmpty)
+        {
+            throw new InvalidOperationException("PDF signature contents could not be extracted for DSS/VRI embedding.");
+        }
+
         var (rootObjectNumber, size, previousXrefOffset) = ReadLatestTrailer(text);
         var rootObject = ReadLatestObjectBody(text, rootObjectNumber);
 
@@ -67,7 +75,7 @@ internal static class PdfDocumentSecurityStoreBuilder
             AddObject(ocspObjectNumbers[i], BuildAsciiHexStream(distinctOcsps[i]));
         }
 
-        var vriKey = Convert.ToHexString(SHA1.HashData(detachedCmsSignature.Span));
+        var vriKey = Convert.ToHexString(SHA1.HashData(signatureContentsBytes.Span));
         AddObject(vriEntryObjectNumber, BuildVriEntry(certObjectNumbers, crlObjectNumbers, ocspObjectNumbers));
         AddObject(vriMapObjectNumber, $"<< /{vriKey} {vriEntryObjectNumber} 0 R >>");
         AddObject(dssObjectNumber, BuildDssDictionary(certObjectNumbers, crlObjectNumbers, ocspObjectNumbers, vriMapObjectNumber));
