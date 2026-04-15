@@ -4,6 +4,9 @@ using System.Security.Cryptography.X509Certificates;
 using DigitalSignature.Abstractions;
 using DigitalSignature.CAdES;
 using DigitalSignature.Core;
+using Org.BouncyCastle.Crypto.Operators;
+using Org.BouncyCastle.Security;
+using Org.BouncyCastle.X509;
 
 namespace DigitalSignature.CAdES.Tests;
 
@@ -87,6 +90,45 @@ public class CAdESBaselineBServiceTests
         Assert.Equal(SignatureLevel.BaselineT, timestampedArtifact.Level);
         Assert.Equal(SignatureLevel.BaselineT, descriptor.Level);
         Assert.Single(descriptor.ValidationMaterial.Timestamps);
+        Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
+    }
+
+    [Fact]
+    public async Task CreateAttachedSignature_ShouldProduceCAdESBaselineLTArtifact_WhenValidationDataIsProvided()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=CAdES Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=CAdES Test TSA");
+
+        var service = new CAdESBaselineBService();
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate, fixedTimestamp: DateTimeOffset.Parse("2026-04-15T18:40:00Z"));
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048);
+        var request = new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, "Hello CAdES-LT"u8.ToArray());
+
+        var signingTime = DateTimeOffset.Parse("2026-04-15T18:30:00Z");
+        var baselineBArtifact = service.CreateAttachedSignature(request, certificate, rsa, suite, signingTime);
+        var timestampMaterial = await CreateTimestampForAttachedSignatureAsync(baselineBArtifact.Data, timestampProvider);
+        var revocationInfo = CreateCrlRevocationInfo(certificate, rsa, DateTimeOffset.Parse("2026-04-15T18:35:00Z"));
+
+        var baselineLTArtifact = service.CreateAttachedSignature(
+            request with { Level = SignatureLevel.BaselineLT },
+            certificate,
+            rsa,
+            suite,
+            signingTime,
+            signatureTimestamp: timestampMaterial,
+            validationCertificates: [certificate],
+            revocationInfo: [revocationInfo]);
+
+        var descriptor = service.ReadSignature(baselineLTArtifact.Data);
+        var validation = service.VerifyAttachedSignature(baselineLTArtifact.Data);
+
+        Assert.Equal(SignatureLevel.BaselineLT, baselineLTArtifact.Level);
+        Assert.Equal(SignatureLevel.BaselineLT, descriptor.Level);
+        Assert.NotEmpty(descriptor.ValidationMaterial.CertificateValues);
+        Assert.NotEmpty(descriptor.ValidationMaterial.RevocationValues);
+        Assert.Single(descriptor.ValidationMaterial.RevocationInfo);
         Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
     }
 
@@ -176,8 +218,24 @@ public class CAdESBaselineBServiceTests
     {
         var signedCms = new SignedCms(new ContentInfo(payload.ToArray()), detached: true);
         signedCms.Decode(signature.ToArray());
+        return await CreateTimestampFromSignerInfoAsync(signedCms.SignerInfos[0], timestampProvider);
+    }
+
+    private static async Task<TimestampMaterial> CreateTimestampForAttachedSignatureAsync(
+        ReadOnlyMemory<byte> signature,
+        ITimestampProvider timestampProvider)
+    {
+        var signedCms = new SignedCms();
+        signedCms.Decode(signature.ToArray());
+        return await CreateTimestampFromSignerInfoAsync(signedCms.SignerInfos[0], timestampProvider);
+    }
+
+    private static async Task<TimestampMaterial> CreateTimestampFromSignerInfoAsync(
+        SignerInfo signerInfo,
+        ITimestampProvider timestampProvider)
+    {
         var timestampRequest = Rfc3161TimestampRequest.CreateFromSignerInfo(
-            signedCms.SignerInfos[0],
+            signerInfo,
             HashAlgorithmName.SHA256,
             null,
             null,
@@ -195,6 +253,28 @@ public class CAdESBaselineBServiceTests
         Assert.True(response.IsSuccess);
         Assert.NotNull(response.Timestamp);
         return response.Timestamp!;
+    }
+
+    private static RevocationInfo CreateCrlRevocationInfo(
+        X509Certificate2 certificate,
+        RSA issuerKey,
+        DateTimeOffset thisUpdate)
+    {
+        var generator = new X509V2CrlGenerator();
+        generator.SetIssuerDN(DotNetUtilities.FromX509Certificate(certificate).SubjectDN);
+        generator.SetThisUpdate(thisUpdate.UtcDateTime);
+        generator.SetNextUpdate(thisUpdate.AddDays(7).UtcDateTime);
+
+        var crl = generator.Generate(new Asn1SignatureFactory("SHA256WITHRSA", DotNetUtilities.GetRsaKeyPair(issuerKey).Private));
+        return new RevocationInfo(
+            "CRL",
+            thisUpdate,
+            thisUpdate.AddDays(7),
+            false,
+            null)
+        {
+            EncodedValue = crl.GetEncoded()
+        };
     }
 
     private static X509Certificate2 CreateSelfSignedCertificate(RSA rsa, string subjectName)

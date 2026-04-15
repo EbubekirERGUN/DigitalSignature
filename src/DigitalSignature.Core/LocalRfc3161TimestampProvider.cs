@@ -1,8 +1,10 @@
-using System.Formats.Asn1;
 using System.Security.Cryptography;
-using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
 using DigitalSignature.Abstractions;
+using Org.BouncyCastle.Math;
+using Org.BouncyCastle.Security;
+using Org.BouncyCastle.Tsp;
+using Org.BouncyCastle.Utilities.Collections;
 
 namespace DigitalSignature.Core;
 
@@ -31,36 +33,35 @@ public sealed class LocalRfc3161TimestampProvider(
 
             var timestamp = fixedTimestamp ?? DateTimeOffset.UtcNow;
             var hashAlgorithmOid = ResolveHashAlgorithmOid(request.HashAlgorithm);
-            var tokenInfo = new Rfc3161TimestampTokenInfo(
-                new Oid(request.PolicyOid ?? defaultPolicyOid),
-                hashAlgorithmOid,
-                request.HashedMessage,
-                CreateSerialNumber(),
-                timestamp,
-                null,
-                false,
-                ParseNonce(request.Nonce),
-                null,
-                new X509ExtensionCollection());
+            var tsaPolicyOid = request.PolicyOid ?? defaultPolicyOid;
+            var nonce = ParseNonce(request.Nonce);
+            var bcCertificate = DotNetUtilities.FromX509Certificate(tsaCertificate);
+            var bcPrivateKey = DotNetUtilities.GetRsaKeyPair(rsa).Private;
 
-            var signedCms = new SignedCms(
-                new ContentInfo(new Oid("1.2.840.113549.1.9.16.1.4"), tokenInfo.Encode()),
-                detached: false);
+            var requestGenerator = new TimeStampRequestGenerator();
+            requestGenerator.SetCertReq(request.RequireCertificate);
+            requestGenerator.SetReqPolicy(tsaPolicyOid);
 
-            var signer = new CmsSigner(SubjectIdentifierType.IssuerAndSerialNumber, tsaCertificate)
-            {
-                IncludeOption = request.RequireCertificate ? X509IncludeOption.EndCertOnly : X509IncludeOption.None,
-                DigestAlgorithm = hashAlgorithmOid
-            };
+            var timeStampRequest = nonce is null
+                ? requestGenerator.Generate(hashAlgorithmOid.Value!, request.HashedMessage.ToArray())
+                : requestGenerator.Generate(hashAlgorithmOid.Value!, request.HashedMessage.ToArray(), nonce);
 
-            signer.SignedAttributes.Add(CreateSigningCertificateV2Attribute(tsaCertificate, hashAlgorithmOid));
-            signedCms.ComputeSignature(signer, silent: true);
+            var tokenGenerator = new TimeStampTokenGenerator(
+                bcPrivateKey,
+                bcCertificate,
+                hashAlgorithmOid.Value!,
+                tsaPolicyOid);
+            tokenGenerator.SetCertificates(CollectionUtilities.CreateStore([bcCertificate]));
+
+            var encodedToken = tokenGenerator
+                .Generate(timeStampRequest, CreateSerialNumber(), timestamp.UtcDateTime)
+                .GetEncoded("DER");
 
             return ValueTask.FromResult(TimestampResponse.Success(
                 new TimestampMaterial(
-                    signedCms.Encode(),
+                    encodedToken,
                     timestamp,
-                    request.PolicyOid ?? defaultPolicyOid,
+                    tsaPolicyOid,
                     NormalizeHashAlgorithmName(hashAlgorithmOid))));
         }
         catch (Exception ex) when (ex is CryptographicException or ArgumentException or InvalidOperationException or FormatException)
@@ -71,34 +72,12 @@ public sealed class LocalRfc3161TimestampProvider(
         }
     }
 
-    private static Pkcs9AttributeObject CreateSigningCertificateV2Attribute(X509Certificate2 certificate, Oid hashAlgorithmOid)
-    {
-        var certificateHash = HashCertificate(certificate.RawData, hashAlgorithmOid);
-
-        var writer = new AsnWriter(AsnEncodingRules.DER);
-        writer.PushSequence();
-        writer.PushSequence();
-        writer.PushSequence();
-        writer.PushSequence();
-        writer.WriteObjectIdentifier(hashAlgorithmOid.Value!);
-        writer.PopSequence();
-        writer.WriteOctetString(certificateHash);
-        writer.PopSequence();
-        writer.PopSequence();
-        writer.PopSequence();
-
-        return new Pkcs9AttributeObject("1.2.840.113549.1.9.16.2.47", writer.Encode());
-    }
-
-    private static byte[] CreateSerialNumber()
+    private static BigInteger CreateSerialNumber()
     {
         var serialNumber = new byte[16];
         RandomNumberGenerator.Fill(serialNumber);
         serialNumber[0] &= 0x7F;
-
-        return serialNumber[0] == 0
-            ? [0x01, .. serialNumber[1..]]
-            : serialNumber;
+        return new BigInteger(1, serialNumber);
     }
 
     private static Oid ResolveHashAlgorithmOid(string? hashAlgorithm)
@@ -121,21 +100,13 @@ public sealed class LocalRfc3161TimestampProvider(
         _ => hashAlgorithmOid.Value ?? string.Empty
     };
 
-    private static ReadOnlyMemory<byte>? ParseNonce(string? nonce)
+    private static BigInteger? ParseNonce(string? nonce)
     {
         if (string.IsNullOrWhiteSpace(nonce))
         {
             return null;
         }
 
-        return Convert.FromHexString(nonce);
+        return new BigInteger(1, Convert.FromHexString(nonce));
     }
-
-    private static byte[] HashCertificate(ReadOnlySpan<byte> rawData, Oid hashAlgorithmOid) => hashAlgorithmOid.Value switch
-    {
-        "2.16.840.1.101.3.4.2.1" => SHA256.HashData(rawData),
-        "2.16.840.1.101.3.4.2.2" => SHA384.HashData(rawData),
-        "2.16.840.1.101.3.4.2.3" => SHA512.HashData(rawData),
-        _ => throw new NotSupportedException($"Unsupported timestamp hash algorithm OID: {hashAlgorithmOid.Value}.")
-    };
 }

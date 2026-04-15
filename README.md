@@ -4,13 +4,13 @@
 
 ## Destek durumu
 
-| Format | Baseline-B | Baseline-T | Durum |
-|---|---:|---:|---|
-| CAdES | Yes | Yes | Çalışıyor |
-| XAdES | Yes | Yes | Çalışıyor |
-| PAdES | Yes | Yes | Çalışıyor |
-| ASiC-S | Yes | Yes | Çalışıyor |
-| JAdES | Yes | Partial | Baseline-B çalışıyor, T tamam değil |
+| Format | Baseline-B | Baseline-T | Baseline-LT | Durum |
+|---|---:|---:|---:|---|
+| CAdES | Yes | Yes | Yes | Çalışıyor |
+| XAdES | Yes | Yes | No | LT sırada |
+| PAdES | Yes | Yes | No | LT sırada |
+| ASiC-S | Yes | Yes | No | LT sırada |
+| JAdES | Yes | Partial | No | Baseline-B çalışıyor, T ve LT tamam değil |
 
 ## Kurulum
 
@@ -53,7 +53,7 @@ var suite = new SignatureSuite(
     IsRecommended: true);
 
 var signature = service.CreateDetachedSignature(request, certificate, rsa, suite);
-var validation = service.VerifyDetachedSignature(payload, signature.Content.Span, certificate);
+var validation = service.VerifyDetachedSignature(payload, signature.Data);
 
 Console.WriteLine(validation.Conclusion);
 ```

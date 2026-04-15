@@ -9,6 +9,9 @@ using DigitalSignature.Core;
 using DigitalSignature.JAdES;
 using DigitalSignature.PAdES;
 using DigitalSignature.XAdES;
+using Org.BouncyCastle.Crypto.Operators;
+using Org.BouncyCastle.Security;
+using Org.BouncyCastle.X509;
 
 namespace DigitalSignature.RuntimeTests;
 
@@ -97,6 +100,36 @@ public class RuntimeSmokeTests
         Assert.Equal(ValidationConclusion.Valid, verification.Conclusion);
         Assert.Equal(SignatureLevel.BaselineT, descriptor.Level);
         Assert.Single(descriptor.ValidationMaterial.Timestamps);
+    }
+
+    [Fact]
+    public async Task CAdES_RuntimeSmoke_ShouldCreateAndVerifyAttachedBaselineLTSignature()
+    {
+        using var material = new RuntimeMaterial();
+        var service = new CAdESBaselineBService();
+        var baselineBRequest = new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, RuntimeSmokeFixtures.CadesPayload);
+
+        var signingTime = DateTimeOffset.Parse("2026-04-14T08:06:00Z");
+        var baselineBArtifact = service.CreateAttachedSignature(baselineBRequest, material.Certificate, material.Key, material.Suite, signingTime);
+        var timestampMaterial = await CreateTimestampForAttachedSignatureAsync(baselineBArtifact.Data, material.TimestampProvider);
+        var revocationInfo = CreateCrlRevocationInfo(material.Certificate, material.Key, DateTimeOffset.Parse("2026-04-14T08:07:00Z"));
+        var baselineLTArtifact = service.CreateAttachedSignature(
+            baselineBRequest with { Level = SignatureLevel.BaselineLT },
+            material.Certificate,
+            material.Key,
+            material.Suite,
+            signingTime,
+            signatureTimestamp: timestampMaterial,
+            validationCertificates: [material.Certificate],
+            revocationInfo: [revocationInfo]);
+        var verification = service.VerifyAttachedSignature(baselineLTArtifact.Data);
+        var descriptor = service.ReadSignature(baselineLTArtifact.Data);
+
+        Assert.Equal(ValidationConclusion.Valid, verification.Conclusion);
+        Assert.Equal(SignatureLevel.BaselineLT, descriptor.Level);
+        Assert.NotEmpty(descriptor.ValidationMaterial.CertificateValues);
+        Assert.NotEmpty(descriptor.ValidationMaterial.RevocationValues);
+        Assert.Single(descriptor.ValidationMaterial.RevocationInfo);
     }
 
     [Fact]
@@ -243,6 +276,28 @@ public class RuntimeSmokeTests
         Assert.True(response.IsSuccess);
         Assert.NotNull(response.Timestamp);
         return response.Timestamp!;
+    }
+
+    private static RevocationInfo CreateCrlRevocationInfo(
+        X509Certificate2 certificate,
+        RSA issuerKey,
+        DateTimeOffset thisUpdate)
+    {
+        var generator = new X509V2CrlGenerator();
+        generator.SetIssuerDN(DotNetUtilities.FromX509Certificate(certificate).SubjectDN);
+        generator.SetThisUpdate(thisUpdate.UtcDateTime);
+        generator.SetNextUpdate(thisUpdate.AddDays(7).UtcDateTime);
+
+        var crl = generator.Generate(new Asn1SignatureFactory("SHA256WITHRSA", DotNetUtilities.GetRsaKeyPair(issuerKey).Private));
+        return new RevocationInfo(
+            "CRL",
+            thisUpdate,
+            thisUpdate.AddDays(7),
+            false,
+            null)
+        {
+            EncodedValue = crl.GetEncoded()
+        };
     }
 
     private sealed class RuntimeMaterial : IDisposable

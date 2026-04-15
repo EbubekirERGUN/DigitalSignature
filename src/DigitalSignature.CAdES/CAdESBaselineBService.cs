@@ -7,7 +7,16 @@ using DigitalSignature.Abstractions;
 using DigitalSignature.Core;
 using Org.BouncyCastle.Asn1;
 using Org.BouncyCastle.Asn1.Cms;
+using Org.BouncyCastle.Asn1.Esf;
+using Org.BouncyCastle.Asn1.Ocsp;
+using Org.BouncyCastle.Asn1.Pkcs;
+using Org.BouncyCastle.Asn1.X509;
 using Org.BouncyCastle.Cms;
+using Org.BouncyCastle.Security;
+using Org.BouncyCastle.Tsp;
+using Org.BouncyCastle.Utilities.Collections;
+using Org.BouncyCastle.X509;
+using X509Certificate = Org.BouncyCastle.X509.X509Certificate;
 
 namespace DigitalSignature.CAdES;
 
@@ -21,10 +30,12 @@ public sealed class CAdESBaselineBService
         RSA privateKey,
         SignatureSuite suite,
         DateTimeOffset? signingTime = null,
-        TimestampMaterial? signatureTimestamp = null)
+        TimestampMaterial? signatureTimestamp = null,
+        IReadOnlyList<X509Certificate2>? validationCertificates = null,
+        IReadOnlyList<RevocationInfo>? revocationInfo = null)
     {
         ValidateSigningInputs(request, signingCertificate, privateKey, suite);
-        return CreateSignature(request, signingCertificate, privateKey, suite, detached: true, signingTime, signatureTimestamp);
+        return CreateSignature(request, signingCertificate, privateKey, suite, detached: true, signingTime, signatureTimestamp, validationCertificates, revocationInfo);
     }
 
     public SignatureArtifact CreateAttachedSignature(
@@ -33,10 +44,12 @@ public sealed class CAdESBaselineBService
         RSA privateKey,
         SignatureSuite suite,
         DateTimeOffset? signingTime = null,
-        TimestampMaterial? signatureTimestamp = null)
+        TimestampMaterial? signatureTimestamp = null,
+        IReadOnlyList<X509Certificate2>? validationCertificates = null,
+        IReadOnlyList<RevocationInfo>? revocationInfo = null)
     {
         ValidateSigningInputs(request, signingCertificate, privateKey, suite);
-        return CreateSignature(request, signingCertificate, privateKey, suite, detached: false, signingTime, signatureTimestamp);
+        return CreateSignature(request, signingCertificate, privateKey, suite, detached: false, signingTime, signatureTimestamp, validationCertificates, revocationInfo);
     }
 
     public SignatureDescriptor ReadSignature(ReadOnlyMemory<byte> signature)
@@ -44,8 +57,9 @@ public sealed class CAdESBaselineBService
         var parsed = Decode(signature);
         var signer = parsed.SignerInfos[0];
         var certificate = signer.Certificate ?? parsed.Certificates[0];
-        var timestamps = ReadSignatureTimestamps(signer);
-        var level = timestamps.Count > 0 ? SignatureLevel.BaselineT : SignatureLevel.BaselineB;
+        var timestamps = ReadSignatureTimestamps(signature);
+        var embeddedValidationData = ReadEmbeddedValidationData(signature, certificate);
+        var level = DetermineLevel(timestamps, embeddedValidationData);
 
         return new SignatureDescriptor(
             SignatureFormat.CAdES,
@@ -54,10 +68,14 @@ public sealed class CAdESBaselineBService
             TryGetSigningTime(signer),
             new ValidationMaterial(
                 certificate is null ? null : CreateCertificateReference(certificate),
-                certificate is null ? Array.Empty<SigningCertificateReference>() : [CreateCertificateReference(certificate)],
-                Array.Empty<RevocationInfo>(),
+                BuildCertificateChainReferences(certificate, parsed.Certificates, embeddedValidationData.CertificateValues),
+                embeddedValidationData.RevocationInfo,
                 timestamps,
-                Array.Empty<ReadOnlyMemory<byte>>()),
+                Array.Empty<ReadOnlyMemory<byte>>())
+            {
+                CertificateValues = embeddedValidationData.CertificateValues,
+                RevocationValues = embeddedValidationData.RevocationValues
+            },
             SignatureAlgorithm: signer.SignatureAlgorithm?.Value,
             DigestAlgorithm: signer.DigestAlgorithm?.Value);
     }
@@ -86,10 +104,17 @@ public sealed class CAdESBaselineBService
                 "CMS/CAdES signature does not contain a SignerInfo."));
         }
 
-        var timestampValidation = ValidateSignatureTimestamps(signedCms.SignerInfos[0]);
+        var signer = signedCms.SignerInfos[0];
+        var timestampValidation = ValidateSignatureTimestamps(signature);
         if (timestampValidation is not null)
         {
             return ValidationResult.Failure(timestampValidation);
+        }
+
+        var validationDataFailure = ValidateEmbeddedValidationData(signature, signer.Certificate ?? signedCms.Certificates[0]);
+        if (validationDataFailure is not null)
+        {
+            return ValidationResult.Failure(validationDataFailure);
         }
 
         return ValidationResult.Success(ReadSignature(signature));
@@ -110,10 +135,17 @@ public sealed class CAdESBaselineBService
                     "CMS/CAdES signature does not contain a SignerInfo."));
             }
 
-            var timestampValidation = ValidateSignatureTimestamps(signedCms.SignerInfos[0]);
+            var signer = signedCms.SignerInfos[0];
+            var timestampValidation = ValidateSignatureTimestamps(signature);
             if (timestampValidation is not null)
             {
                 return ValidationResult.Failure(timestampValidation);
+            }
+
+            var validationDataFailure = ValidateEmbeddedValidationData(signature, signer.Certificate ?? signedCms.Certificates[0]);
+            if (validationDataFailure is not null)
+            {
+                return ValidationResult.Failure(validationDataFailure);
             }
 
             return ValidationResult.Success(ReadSignature(signature));
@@ -134,13 +166,20 @@ public sealed class CAdESBaselineBService
         SignatureSuite suite,
         bool detached,
         DateTimeOffset? signingTime,
-        TimestampMaterial? signatureTimestamp)
+        TimestampMaterial? signatureTimestamp,
+        IReadOnlyList<X509Certificate2>? validationCertificates,
+        IReadOnlyList<RevocationInfo>? revocationInfo)
     {
         EnsureSupportedLevel(request.Level);
 
-        if (request.Level == SignatureLevel.BaselineT && signatureTimestamp is null)
+        if (request.Level is SignatureLevel.BaselineT or SignatureLevel.BaselineLT && signatureTimestamp is null)
         {
-            throw new InvalidOperationException("CAdES Baseline-T signing requires a signature timestamp token.");
+            throw new InvalidOperationException($"CAdES {request.Level} signing requires a signature timestamp token.");
+        }
+
+        if (request.Level == SignatureLevel.BaselineLT && (revocationInfo is null || revocationInfo.Count == 0 || revocationInfo.All(info => info.EncodedValue.IsEmpty)))
+        {
+            throw new InvalidOperationException("CAdES Baseline-LT signing requires embedded revocation values.");
         }
 
         var contentInfo = new System.Security.Cryptography.Pkcs.ContentInfo(request.Payload.ToArray());
@@ -158,9 +197,18 @@ public sealed class CAdESBaselineBService
         signedCms.ComputeSignature(signer, silent: true);
 
         var encodedSignature = signedCms.Encode();
-        if (request.Level == SignatureLevel.BaselineT)
+        if (request.Level is SignatureLevel.BaselineT or SignatureLevel.BaselineLT)
         {
             encodedSignature = AttachSignatureTimestamp(encodedSignature, signatureTimestamp!);
+        }
+
+        if (request.Level == SignatureLevel.BaselineLT)
+        {
+            encodedSignature = AttachEmbeddedValidationData(
+                encodedSignature,
+                NormalizeValidationCertificates(signingCertificate, validationCertificates),
+                revocationInfo!,
+                suite.HashAlgorithm);
         }
 
         return new SignatureArtifact(
@@ -196,9 +244,9 @@ public sealed class CAdESBaselineBService
 
     private static void EnsureSupportedLevel(SignatureLevel level)
     {
-        if (level is not SignatureLevel.BaselineB and not SignatureLevel.BaselineT)
+        if (level is not SignatureLevel.BaselineB and not SignatureLevel.BaselineT and not SignatureLevel.BaselineLT)
         {
-            throw new ArgumentException("CAdES signing currently supports only Baseline-B and Baseline-T requests.");
+            throw new ArgumentException("CAdES signing currently supports only Baseline-B, Baseline-T and Baseline-LT requests.");
         }
     }
 
@@ -209,9 +257,13 @@ public sealed class CAdESBaselineBService
             throw new InvalidOperationException("Signature timestamp token cannot be empty.");
         }
 
-        if (!Rfc3161TimestampToken.TryDecode(timestamp.Token, out _, out _))
+        try
         {
-            throw new InvalidOperationException("Signature timestamp token must be a decodable RFC 3161 token.");
+            _ = new TimeStampToken(new CmsSignedData(timestamp.Token.ToArray()));
+        }
+        catch (Exception ex) when (ex is CmsException or TspException)
+        {
+            throw new InvalidOperationException("Signature timestamp token must be a decodable RFC 3161 token.", ex);
         }
 
         var cms = new CmsSignedData(signature.ToArray());
@@ -221,16 +273,170 @@ public sealed class CAdESBaselineBService
             new DerObjectIdentifier(SignatureTimeStampTokenOid),
             new DerSet(Asn1Object.FromByteArray(timestamp.Token.ToArray())));
 
-        var updatedSigner = SignerInformation.ReplaceUnsignedAttributes(signer, new AttributeTable(unsignedAttributes));
+        var updatedSigner = SignerInformation.ReplaceUnsignedAttributes(signer, new Org.BouncyCastle.Asn1.Cms.AttributeTable(unsignedAttributes));
         var signerStore = new SignerInformationStore([updatedSigner]);
         return CmsSignedData.ReplaceSigners(cms, signerStore).GetEncoded();
     }
 
-    private static IReadOnlyList<TimestampMaterial> ReadSignatureTimestamps(System.Security.Cryptography.Pkcs.SignerInfo signer)
+    private static byte[] AttachEmbeddedValidationData(
+        ReadOnlyMemory<byte> signature,
+        IReadOnlyList<X509Certificate2> validationCertificates,
+        IReadOnlyList<RevocationInfo> revocationInfo,
+        HashAlgorithmIdentifier hashAlgorithm)
     {
+        var cms = new CmsSignedData(signature.ToArray());
+        var signer = cms.GetSignerInfos().GetSigners().Cast<SignerInformation>().Single();
+        var unsignedAttributes = signer.UnsignedAttributes?.ToDictionary() ?? new Dictionary<DerObjectIdentifier, object>();
+
+        unsignedAttributes[PkcsObjectIdentifiers.IdAAEtsCertValues] = new Org.BouncyCastle.Asn1.Cms.Attribute(
+            PkcsObjectIdentifiers.IdAAEtsCertValues,
+            new DerSet(BuildCertificateValues(validationCertificates)));
+        unsignedAttributes[PkcsObjectIdentifiers.IdAAEtsRevocationValues] = new Org.BouncyCastle.Asn1.Cms.Attribute(
+            PkcsObjectIdentifiers.IdAAEtsRevocationValues,
+            new DerSet(BuildRevocationValues(revocationInfo)));
+
+        var updatedSigner = SignerInformation.ReplaceUnsignedAttributes(signer, new Org.BouncyCastle.Asn1.Cms.AttributeTable(unsignedAttributes));
+        var cmsWithSigner = CmsSignedData.ReplaceSigners(cms, new SignerInformationStore([updatedSigner]));
+
+        var certificates = cmsWithSigner.GetCertificates().EnumerateMatches(null).ToList();
+        certificates.AddRange(validationCertificates.Select(DotNetUtilities.FromX509Certificate));
+        certificates = certificates
+            .GroupBy(certificate => Convert.ToBase64String(certificate.GetEncoded()))
+            .Select(group => group.First())
+            .ToList();
+
+        var crls = cmsWithSigner.GetCrls().EnumerateMatches(null).ToList();
+        crls.AddRange(
+            revocationInfo
+                .Where(info => !info.EncodedValue.IsEmpty && IsCrlSource(info.Source))
+                .Select(info => new X509CrlParser().ReadCrl(info.EncodedValue.ToArray()))
+                .Where(crl => crl is not null)!);
+        crls = crls
+            .GroupBy(crl => Convert.ToBase64String(crl.GetEncoded()))
+            .Select(group => group.First())
+            .ToList();
+
+        return CmsSignedData.ReplaceCertificatesAndCrls(
+            cmsWithSigner,
+            CollectionUtilities.CreateStore(certificates),
+            CollectionUtilities.CreateStore(crls))
+            .GetEncoded();
+    }
+
+    private static CertificateValues BuildCertificateValues(IEnumerable<X509Certificate2> certificates)
+    {
+        var values = certificates
+            .Select(certificate => X509CertificateStructure.GetInstance(Asn1Object.FromByteArray(certificate.RawData)))
+            .ToArray();
+
+        return new CertificateValues(values);
+    }
+
+    private static RevocationValues BuildRevocationValues(IEnumerable<RevocationInfo> revocationInfo)
+    {
+        var crls = new List<CertificateList>();
+        var ocspResponses = new List<BasicOcspResponse>();
+
+        foreach (var info in revocationInfo.Where(info => !info.EncodedValue.IsEmpty))
+        {
+            var rawValue = info.EncodedValue.ToArray();
+            if (IsCrlSource(info.Source))
+            {
+                crls.Add(CertificateList.GetInstance(Asn1Object.FromByteArray(rawValue)));
+                continue;
+            }
+
+            if (IsOcspSource(info.Source))
+            {
+                ocspResponses.Add(BasicOcspResponse.GetInstance(Asn1Object.FromByteArray(rawValue)));
+                continue;
+            }
+
+            throw new InvalidOperationException($"Unsupported revocation source '{info.Source}' for CAdES Baseline-LT embedding.");
+        }
+
+        return new RevocationValues(crls, ocspResponses, null);
+    }
+
+    private static EmbeddedValidationData ReadEmbeddedValidationData(ReadOnlyMemory<byte> signature, X509Certificate2? signingCertificate)
+    {
+        var cms = new CmsSignedData(signature.ToArray());
+        var signer = cms.GetSignerInfos().GetSigners().Cast<SignerInformation>().Single();
+        var unsignedAttributes = signer.UnsignedAttributes;
+        var certificateValues = new List<ReadOnlyMemory<byte>>();
+        var revocationValues = new List<ReadOnlyMemory<byte>>();
+        var revocationInfo = new List<RevocationInfo>();
+
+        var certificateValuesAttribute = unsignedAttributes?[PkcsObjectIdentifiers.IdAAEtsCertValues];
+        if (certificateValuesAttribute is not null)
+        {
+            foreach (Asn1Encodable attributeValue in certificateValuesAttribute.AttrValues)
+            {
+                var values = CertificateValues.GetInstance(attributeValue);
+                certificateValues.AddRange(values.GetCertificates().Select(certificate => (ReadOnlyMemory<byte>)certificate.GetEncoded()));
+            }
+        }
+
+        var revocationValuesAttribute = unsignedAttributes?[PkcsObjectIdentifiers.IdAAEtsRevocationValues];
+        if (revocationValuesAttribute is not null)
+        {
+            foreach (Asn1Encodable attributeValue in revocationValuesAttribute.AttrValues)
+            {
+                var values = RevocationValues.GetInstance(attributeValue);
+
+                foreach (var crl in values.GetCrlVals() ?? Array.Empty<CertificateList>())
+                {
+                    var rawValue = crl.GetEncoded();
+                    revocationValues.Add(rawValue);
+                    revocationInfo.Add(MapCrlRevocationInfo(rawValue, signingCertificate));
+                }
+
+                foreach (var ocsp in values.GetOcspVals() ?? Array.Empty<BasicOcspResponse>())
+                {
+                    var rawValue = ocsp.GetEncoded();
+                    revocationValues.Add(rawValue);
+                    revocationInfo.Add(MapOcspRevocationInfo(rawValue));
+                }
+            }
+        }
+
+        return new EmbeddedValidationData(certificateValues, revocationInfo, revocationValues);
+    }
+
+    private static ValidationFailure? ValidateEmbeddedValidationData(ReadOnlyMemory<byte> signature, X509Certificate2? signingCertificate)
+    {
+        EmbeddedValidationData validationData;
+        try
+        {
+            validationData = ReadEmbeddedValidationData(signature, signingCertificate);
+        }
+        catch (Exception ex) when (ex is CryptographicException or InvalidCastException or InvalidOperationException or ArgumentException)
+        {
+            return new ValidationFailure(
+                ValidationFailureKind.MalformedSignature,
+                ValidationErrorCodes.MalformedSignature,
+                $"Embedded CAdES-LT validation material could not be decoded: {ex.Message}");
+        }
+
+        var hasCertificateValues = validationData.CertificateValues.Count > 0;
+        var hasRevocationValues = validationData.RevocationValues.Count > 0;
+        if (hasCertificateValues != hasRevocationValues)
+        {
+            return new ValidationFailure(
+                ValidationFailureKind.MalformedSignature,
+                ValidationErrorCodes.MalformedSignature,
+                "CAdES embedded validation material must contain both CertificateValues and RevocationValues.");
+        }
+
+        return null;
+    }
+
+    private static IReadOnlyList<TimestampMaterial> ReadSignatureTimestamps(ReadOnlyMemory<byte> signature)
+    {
+        var signedCms = Decode(signature);
         var timestamps = new List<TimestampMaterial>();
 
-        foreach (CryptographicAttributeObject attribute in signer.UnsignedAttributes)
+        foreach (CryptographicAttributeObject attribute in signedCms.SignerInfos[0].UnsignedAttributes)
         {
             if (attribute.Oid?.Value != SignatureTimeStampTokenOid)
             {
@@ -239,52 +445,63 @@ public sealed class CAdESBaselineBService
 
             foreach (AsnEncodedData value in attribute.Values)
             {
-                if (!Rfc3161TimestampToken.TryDecode(value.RawData, out var timestampToken, out _))
+                try
                 {
-                    continue;
+                    var token = new TimeStampToken(new CmsSignedData(value.RawData));
+                    timestamps.Add(new TimestampMaterial(
+                        token.GetEncoded("DER"),
+                        new DateTimeOffset(token.TimeStampInfo.GenTime.ToUniversalTime()),
+                        token.TimeStampInfo.Policy,
+                        GetDigestFromOid(token.TimeStampInfo.MessageImprintAlgOid)));
                 }
-
-                timestamps.Add(new TimestampMaterial(
-                    value.RawData,
-                    timestampToken!.TokenInfo.Timestamp,
-                    timestampToken.TokenInfo.PolicyId?.Value,
-                    GetDigestFromOid(timestampToken.TokenInfo.HashAlgorithmId?.Value)));
+                catch
+                {
+                    // Ignore malformed timestamp attributes during read; verification will surface them.
+                }
             }
         }
 
         return timestamps;
     }
 
-    private static ValidationFailure? ValidateSignatureTimestamps(System.Security.Cryptography.Pkcs.SignerInfo signer)
+    private static ValidationFailure? ValidateSignatureTimestamps(ReadOnlyMemory<byte> signature)
     {
-        foreach (CryptographicAttributeObject attribute in signer.UnsignedAttributes)
+        try
         {
-            if (attribute.Oid?.Value != SignatureTimeStampTokenOid)
-            {
-                continue;
-            }
+            var cms = new CmsSignedData(signature.ToArray());
+            var signer = cms.GetSignerInfos().GetSigners().Cast<SignerInformation>().Single();
+            var timestamps = TspUtil.GetSignatureTimestamps(signer).Cast<TimeStampToken>().ToArray();
 
-            foreach (AsnEncodedData value in attribute.Values)
+            foreach (var timestamp in timestamps)
             {
-                if (!Rfc3161TimestampToken.TryDecode(value.RawData, out var timestampToken, out _))
+                var certificate = timestamp.GetCertificates().EnumerateMatches(timestamp.SignerID).SingleOrDefault();
+                if (certificate is null)
                 {
                     return new ValidationFailure(
                         ValidationFailureKind.TimestampInvalid,
                         ValidationErrorCodes.TimestampInvalid,
-                        "Signature timestamp token could not be decoded as an RFC 3161 token.");
+                        "Signature timestamp token does not include a matching TSA certificate.");
                 }
 
-                if (!timestampToken!.VerifySignatureForSignerInfo(signer, out _, null))
+                var timestampSigner = timestamp.ToCmsSignedData().GetSignerInfos().GetSigners().Cast<SignerInformation>().Single();
+                if (!timestampSigner.Verify(certificate))
                 {
                     return new ValidationFailure(
                         ValidationFailureKind.TimestampInvalid,
                         ValidationErrorCodes.TimestampInvalid,
-                        "Signature timestamp token verification failed for the CAdES SignerInfo.");
+                        "Signature timestamp token signature verification failed.");
                 }
             }
+
+            return null;
         }
-
-        return null;
+        catch (Exception ex) when (ex is CmsException or TspException or InvalidOperationException)
+        {
+            return new ValidationFailure(
+                ValidationFailureKind.TimestampInvalid,
+                ValidationErrorCodes.TimestampInvalid,
+                $"Signature timestamp token verification failed: {ex.Message}");
+        }
     }
 
     private static SignedCms Decode(ReadOnlyMemory<byte> signature)
@@ -339,6 +556,115 @@ public sealed class CAdESBaselineBService
         return new Pkcs9AttributeObject("1.2.840.113549.1.9.16.2.47", writer.Encode());
     }
 
+    private static IReadOnlyList<SigningCertificateReference> BuildCertificateChainReferences(
+        X509Certificate2? signingCertificate,
+        X509Certificate2Collection cmsCertificates,
+        IReadOnlyList<ReadOnlyMemory<byte>> certificateValues)
+    {
+        var chain = new List<SigningCertificateReference>();
+        var seenThumbprints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (signingCertificate is not null)
+        {
+            AddCertificateReference(chain, seenThumbprints, signingCertificate);
+        }
+
+        foreach (var certificate in cmsCertificates)
+        {
+            AddCertificateReference(chain, seenThumbprints, certificate);
+        }
+
+        foreach (var rawValue in certificateValues)
+        {
+            using var certificate = X509CertificateLoader.LoadCertificate(rawValue.Span);
+            AddCertificateReference(chain, seenThumbprints, certificate);
+        }
+
+        return chain;
+    }
+
+    private static void AddCertificateReference(
+        ICollection<SigningCertificateReference> chain,
+        ISet<string> seenThumbprints,
+        X509Certificate2 certificate)
+    {
+        if (!seenThumbprints.Add(certificate.Thumbprint))
+        {
+            return;
+        }
+
+        chain.Add(CreateCertificateReference(certificate));
+    }
+
+    private static IReadOnlyList<X509Certificate2> NormalizeValidationCertificates(
+        X509Certificate2 signingCertificate,
+        IReadOnlyList<X509Certificate2>? validationCertificates)
+    {
+        var certificates = new List<X509Certificate2> { signingCertificate };
+        if (validationCertificates is not null)
+        {
+            certificates.AddRange(validationCertificates);
+        }
+
+        return certificates
+            .GroupBy(certificate => certificate.Thumbprint, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
+    }
+
+    private static RevocationInfo MapCrlRevocationInfo(byte[] rawValue, X509Certificate2? signingCertificate)
+    {
+        var crl = new X509CrlParser().ReadCrl(rawValue);
+        bool? isRevoked = null;
+
+        if (signingCertificate is not null)
+        {
+            var bcCertificate = new X509CertificateParser().ReadCertificate(signingCertificate.RawData);
+            if (StringComparer.OrdinalIgnoreCase.Equals(crl.IssuerDN.ToString(), bcCertificate.IssuerDN.ToString()))
+            {
+                isRevoked = crl.IsRevoked(bcCertificate);
+            }
+        }
+
+        return new RevocationInfo(
+            "CRL",
+            new DateTimeOffset(crl.ThisUpdate.ToUniversalTime()),
+            crl.NextUpdate is null ? null : new DateTimeOffset(crl.NextUpdate.Value.ToUniversalTime()),
+            isRevoked,
+            null)
+        {
+            EncodedValue = rawValue
+        };
+    }
+
+    private static RevocationInfo MapOcspRevocationInfo(byte[] rawValue)
+    {
+        var response = BasicOcspResponse.GetInstance(Asn1Object.FromByteArray(rawValue));
+        return new RevocationInfo(
+            "OCSP",
+            new DateTimeOffset(response.TbsResponseData.ProducedAt.ToDateTime().ToUniversalTime()),
+            null,
+            null,
+            null)
+        {
+            EncodedValue = rawValue
+        };
+    }
+
+    private static SignatureLevel DetermineLevel(
+        IReadOnlyList<TimestampMaterial> timestamps,
+        EmbeddedValidationData validationData)
+    {
+        if (timestamps.Count > 0 && validationData.CertificateValues.Count > 0 && validationData.RevocationValues.Count > 0)
+        {
+            return SignatureLevel.BaselineLT;
+        }
+
+        return timestamps.Count > 0
+            ? SignatureLevel.BaselineT
+            : SignatureLevel.BaselineB;
+    }
+
     private static SigningCertificateReference CreateCertificateReference(X509Certificate2 certificate) => new(
         certificate.Subject,
         certificate.Issuer,
@@ -370,4 +696,12 @@ public sealed class CAdESBaselineBService
         "2.16.840.1.101.3.4.2.3" => "SHA-512",
         _ => oid
     };
+
+    private static bool IsCrlSource(string source) => source.Contains("CRL", StringComparison.OrdinalIgnoreCase);
+    private static bool IsOcspSource(string source) => source.Contains("OCSP", StringComparison.OrdinalIgnoreCase);
+
+    private sealed record EmbeddedValidationData(
+        IReadOnlyList<ReadOnlyMemory<byte>> CertificateValues,
+        IReadOnlyList<RevocationInfo> RevocationInfo,
+        IReadOnlyList<ReadOnlyMemory<byte>> RevocationValues);
 }

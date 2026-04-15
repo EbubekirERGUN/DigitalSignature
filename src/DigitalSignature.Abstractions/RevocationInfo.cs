@@ -6,4 +6,7 @@ public sealed record RevocationInfo(
     DateTimeOffset? NextUpdate,
     bool? IsRevoked,
     DateTimeOffset? RevokedAt,
-    string? Reason = null);
+    string? Reason = null)
+{
+    public ReadOnlyMemory<byte> EncodedValue { get; init; } = ReadOnlyMemory<byte>.Empty;
+}

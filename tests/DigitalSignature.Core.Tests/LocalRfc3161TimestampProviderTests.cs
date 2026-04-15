@@ -1,8 +1,10 @@
 using System.Security.Cryptography;
-using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
 using DigitalSignature.Abstractions;
 using DigitalSignature.Core;
+using Org.BouncyCastle.Cms;
+using Org.BouncyCastle.Security;
+using Org.BouncyCastle.Tsp;
 
 namespace DigitalSignature.Core.Tests;
 
@@ -14,7 +16,7 @@ public class LocalRfc3161TimestampProviderTests
         using var rsa = RSA.Create(2048);
         using var certificate = CreateTsaCertificate(rsa, "CN=Local TSA");
 
-        var provider = new LocalRfc3161TimestampProvider(certificate, fixedTimestamp: DateTimeOffset.Parse("2026-04-13T18:00:00Z"));
+        var provider = new LocalRfc3161TimestampProvider(certificate, fixedTimestamp: DateTimeOffset.UtcNow);
         var payload = "timestamped payload"u8.ToArray();
         var request = new TimestampRequest(SHA256.HashData(payload), "SHA-256", "1.2.3.4.5");
 
@@ -22,11 +24,15 @@ public class LocalRfc3161TimestampProviderTests
 
         Assert.True(response.IsSuccess);
         Assert.NotNull(response.Timestamp);
-        Assert.True(Rfc3161TimestampToken.TryDecode(response.Timestamp!.Token, out var token, out _));
-        Assert.NotNull(token);
-        Assert.True(token!.VerifySignatureForData(payload, out var signerCertificate, null));
-        Assert.Equal(certificate.Subject, signerCertificate!.Subject);
-        Assert.Equal("1.2.3.4.5", token.TokenInfo.PolicyId.Value);
+
+        var token = new TimeStampToken(new CmsSignedData(response.Timestamp!.Token.ToArray()));
+        var signerCertificate = token.GetCertificates().EnumerateMatches(token.SignerID).Single();
+        var signer = token.ToCmsSignedData().GetSignerInfos().GetSigners().Cast<SignerInformation>().Single();
+
+        Assert.True(signer.Verify(signerCertificate));
+        Assert.Equal(Convert.ToHexString(SHA256.HashData(payload)), Convert.ToHexString(token.TimeStampInfo.GetMessageImprintDigest()));
+        Assert.Equal(certificate.Subject, DotNetUtilities.ToX509Certificate(signerCertificate).Subject);
+        Assert.Equal("1.2.3.4.5", token.TimeStampInfo.Policy);
     }
 
     private static X509Certificate2 CreateTsaCertificate(RSA rsa, string subjectName)
