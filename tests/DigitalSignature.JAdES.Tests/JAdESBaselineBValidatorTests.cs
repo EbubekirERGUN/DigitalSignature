@@ -67,6 +67,64 @@ public class JAdESBaselineBValidatorTests
         Assert.False(result.HasCanonicalizationClaim);
     }
 
+    [Fact]
+    public async Task ValidateDetachedJsonAsync_ShouldExposeJAdESMetadata_OnIntegrityFailure()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=JAdES Validation Signer");
+
+        var service = new JAdESBaselineBService(new Rfc8785JsonCanonicalizer());
+        var validator = new JAdESBaselineBValidator(
+            service,
+            new SignatureValidationEngine(
+                new StubCertificateChainValidator(),
+                new StubTrustAnchorProvider()));
+
+        var request = new SignatureRequest(SignatureFormat.JAdES, SignatureLevel.BaselineB, Encoding.UTF8.GetBytes("{}"));
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048);
+        var envelope = service.CreateDetachedJsonSignature(request, certificate, rsa, suite);
+
+        var result = await validator.ValidateDetachedJsonAsync(
+            Encoding.UTF8.GetBytes("{\"tampered\":true}"),
+            envelope.JsonDocument,
+            TemporalValidationContext.ForSigningTime(DateTimeOffset.UtcNow, null),
+            certificate);
+
+        Assert.True(result.HasTypHeader);
+        Assert.False(result.HasCanonicalizationClaim);
+        Assert.Equal("RS256", result.Algorithm);
+        Assert.Equal(ValidationConclusion.Invalid, result.Validation.Conclusion);
+    }
+
+    [Fact]
+    public async Task ValidateDetachedJsonAsync_ShouldReturnTrustedValidation_WhenIntegrityAndTrustChecksPass()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=JAdES Validation Signer");
+
+        var service = new JAdESBaselineBService(new Rfc8785JsonCanonicalizer());
+        var validator = new JAdESBaselineBValidator(
+            service,
+            new SignatureValidationEngine(
+                new StubCertificateChainValidator(certificate),
+                new StubTrustAnchorProvider(certificate)));
+
+        var request = new SignatureRequest(SignatureFormat.JAdES, SignatureLevel.BaselineB, Encoding.UTF8.GetBytes("{\"b\":2,\"a\":1}"));
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048);
+        var envelope = service.CreateDetachedJsonSignature(request, certificate, rsa, suite);
+
+        var result = await validator.ValidateDetachedJsonAsync(
+            request.Payload,
+            envelope.JsonDocument,
+            TemporalValidationContext.ForSigningTime(DateTimeOffset.UtcNow, null),
+            certificate);
+
+        Assert.Equal(ValidationConclusion.Valid, result.Validation.Conclusion);
+        Assert.True(result.HasTypHeader);
+        Assert.False(result.HasCanonicalizationClaim);
+        Assert.Equal(SignatureLevel.BaselineB, result.Validation.Signature?.Level);
+    }
+
     private static X509Certificate2 CreateSelfSignedCertificate(RSA rsa, string subjectName)
     {
         var request = new CertificateRequest(subjectName, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);

@@ -6,6 +6,9 @@ using System.Text.Json;
 using DigitalSignature.Abstractions;
 using DigitalSignature.Core;
 using DigitalSignature.JAdES;
+using Org.BouncyCastle.Crypto.Operators;
+using Org.BouncyCastle.Security;
+using Org.BouncyCastle.X509;
 
 namespace DigitalSignature.JAdES.Tests;
 
@@ -91,6 +94,100 @@ public class JAdESBaselineBServiceTests
     }
 
     [Fact]
+    public void CreateSignatureTimestampRequest_ShouldHashBase64UrlEncodedSignatureValue()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=JAdES Test Signer");
+
+        var service = new JAdESBaselineBService(new Rfc8785JsonCanonicalizer());
+        var request = new SignatureRequest(
+            SignatureFormat.JAdES,
+            SignatureLevel.BaselineB,
+            Encoding.UTF8.GetBytes("{\"b\":2,\"a\":1}"),
+            MimeType: "application/json");
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048, IsRecommended: true);
+
+        var envelope = service.CreateDetachedJsonSignature(request, certificate, rsa, suite, DateTimeOffset.Parse("2026-04-13T12:30:00Z"));
+        var timestampRequest = service.CreateSignatureTimestampRequest(envelope, HashAlgorithmIdentifier.Sha256, nonceHex: "AA");
+        var expectedDigest = SHA256.HashData(Encoding.ASCII.GetBytes(envelope.Signature));
+
+        Assert.Equal(expectedDigest, timestampRequest.HashedMessage.ToArray());
+        Assert.Equal("SHA-256", timestampRequest.HashAlgorithm);
+        Assert.Equal("AA", timestampRequest.Nonce);
+    }
+
+    [Fact]
+    public async Task AttachSignatureTimestamp_ShouldProduceBaselineTJsonSignature()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=JAdES Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=JAdES Test TSA");
+
+        var service = new JAdESBaselineBService(new Rfc8785JsonCanonicalizer());
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate);
+        var request = new SignatureRequest(
+            SignatureFormat.JAdES,
+            SignatureLevel.BaselineB,
+            Encoding.UTF8.GetBytes("{\"b\":2,\"a\":1}"),
+            MimeType: "application/json");
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048, IsRecommended: true);
+
+        var baselineBEnvelope = service.CreateDetachedJsonSignature(request, certificate, rsa, suite, DateTimeOffset.Parse("2026-04-13T12:30:00Z"));
+        var timestamp = await CreateSignatureTimestampAsync(service, baselineBEnvelope, timestampProvider, suite.HashAlgorithm);
+        var baselineTEnvelope = service.AttachSignatureTimestamp(baselineBEnvelope, timestamp);
+        var descriptor = service.ReadJsonSignature(baselineTEnvelope.JsonDocument);
+        var validation = service.VerifyDetachedJsonSignature(request.Payload, baselineTEnvelope.JsonDocument, certificate);
+        var etsiUComponentNames = ReadEtsiUComponentNames(baselineTEnvelope.HeaderJson!);
+
+        Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
+        Assert.Equal(SignatureLevel.BaselineT, descriptor.Level);
+        Assert.Single(descriptor.ValidationMaterial.Timestamps);
+        Assert.Equal(new[] { "sigTst" }, etsiUComponentNames);
+    }
+
+    [Fact]
+    public async Task AttachValidationMaterial_ShouldProduceBaselineLTJsonSignature()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=JAdES Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=JAdES Test TSA");
+
+        var service = new JAdESBaselineBService(new Rfc8785JsonCanonicalizer());
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate);
+        var request = new SignatureRequest(
+            SignatureFormat.JAdES,
+            SignatureLevel.BaselineB,
+            Encoding.UTF8.GetBytes("{\"b\":2,\"a\":1}"),
+            MimeType: "application/json");
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048, IsRecommended: true);
+
+        var baselineBEnvelope = service.CreateDetachedJsonSignature(request, certificate, rsa, suite, DateTimeOffset.Parse("2026-04-13T12:30:00Z"));
+        var timestamp = await CreateSignatureTimestampAsync(service, baselineBEnvelope, timestampProvider, suite.HashAlgorithm);
+        var baselineTEnvelope = service.AttachSignatureTimestamp(baselineBEnvelope, timestamp);
+        var baselineLTEnvelope = service.AttachValidationMaterial(
+            baselineTEnvelope,
+            [certificate, tsaCertificate],
+            [
+                CreateCrlRevocationInfo(certificate, rsa, DateTimeOffset.Parse("2026-04-14T08:02:00Z")),
+                CreateCrlRevocationInfo(tsaCertificate, tsaKey, DateTimeOffset.Parse("2026-04-14T08:03:00Z"))
+            ]);
+
+        var descriptor = service.ReadJsonSignature(baselineLTEnvelope.JsonDocument);
+        var validation = service.VerifyDetachedJsonSignature(request.Payload, baselineLTEnvelope.JsonDocument, certificate);
+        var etsiUComponentNames = ReadEtsiUComponentNames(baselineLTEnvelope.HeaderJson!);
+
+        Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
+        Assert.Equal(SignatureLevel.BaselineLT, descriptor.Level);
+        Assert.Single(descriptor.ValidationMaterial.Timestamps);
+        Assert.NotEmpty(descriptor.ValidationMaterial.CertificateValues);
+        Assert.NotEmpty(descriptor.ValidationMaterial.RevocationValues);
+        Assert.NotEmpty(descriptor.ValidationMaterial.RevocationInfo);
+        Assert.Equal(new[] { "sigTst", "xVals", "rVals" }, etsiUComponentNames);
+    }
+
+    [Fact]
     public void VerifyDetachedSignature_ShouldFail_WhenPayloadCanonicalizationDiffers()
     {
         using var rsa = RSA.Create(2048);
@@ -108,6 +205,56 @@ public class JAdESBaselineBServiceTests
 
         Assert.Equal(ValidationConclusion.Invalid, validation.Conclusion);
         Assert.Contains(validation.Failures, failure => failure.Code == ValidationErrorCodes.HashMismatch);
+    }
+
+    private static async Task<TimestampMaterial> CreateSignatureTimestampAsync(
+        JAdESBaselineBService service,
+        JAdESJsonSignatureEnvelope envelope,
+        ITimestampProvider timestampProvider,
+        HashAlgorithmIdentifier hashAlgorithm)
+    {
+        var response = await timestampProvider.GetTimestampAsync(service.CreateSignatureTimestampRequest(envelope, hashAlgorithm));
+
+        Assert.True(response.IsSuccess);
+        Assert.NotNull(response.Timestamp);
+        return response.Timestamp!;
+    }
+
+    private static IReadOnlyList<string> ReadEtsiUComponentNames(string headerJson)
+    {
+        using var document = JsonDocument.Parse(headerJson);
+        return document.RootElement
+            .GetProperty("etsiU")
+            .EnumerateArray()
+            .Select(item => item.ValueKind == JsonValueKind.String ? DecodeBase64Url(item.GetString()!) : item.GetRawText())
+            .Select(componentJson =>
+            {
+                using var componentDocument = JsonDocument.Parse(componentJson);
+                return componentDocument.RootElement.EnumerateObject().Single().Name;
+            })
+            .ToArray();
+    }
+
+    private static RevocationInfo CreateCrlRevocationInfo(
+        X509Certificate2 certificate,
+        RSA issuerKey,
+        DateTimeOffset thisUpdate)
+    {
+        var generator = new X509V2CrlGenerator();
+        generator.SetIssuerDN(DotNetUtilities.FromX509Certificate(certificate).SubjectDN);
+        generator.SetThisUpdate(thisUpdate.UtcDateTime);
+        generator.SetNextUpdate(thisUpdate.AddDays(7).UtcDateTime);
+
+        var crl = generator.Generate(new Asn1SignatureFactory("SHA256WITHRSA", DotNetUtilities.GetRsaKeyPair(issuerKey).Private));
+        return new RevocationInfo(
+            "CRL",
+            thisUpdate,
+            thisUpdate.AddDays(7),
+            false,
+            null)
+        {
+            EncodedValue = crl.GetEncoded()
+        };
     }
 
     private static string DecodeBase64Url(string value)
@@ -140,6 +287,18 @@ public class JAdESBaselineBServiceTests
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
         request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
         request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, false));
+        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+    }
+
+    private static X509Certificate2 CreateTsaCertificate(RSA rsa, string subjectName)
+    {
+        var request = new CertificateRequest(subjectName, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, false));
+        request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.NonRepudiation, true));
+
+        var enhancedKeyUsages = new OidCollection { new("1.3.6.1.5.5.7.3.8") };
+        request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(enhancedKeyUsages, true));
         return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
     }
 }

@@ -234,7 +234,9 @@ public class RuntimeSmokeTests
 
         var envelope = service.CreateDetachedSignature(request, material.Certificate, material.Key, material.Suite);
         var jsonEnvelope = service.CreateDetachedJsonSignature(request, material.Certificate, material.Key, material.Suite);
-        var verification = service.VerifyDetachedSignature(request.Payload, envelope.CompactSerialization, material.Certificate);
+        var compactVerification = service.VerifyDetachedSignature(request.Payload, envelope.CompactSerialization, material.Certificate);
+        var jsonVerification = service.VerifyDetachedJsonSignature(request.Payload, jsonEnvelope.JsonDocument, material.Certificate);
+        var descriptor = service.ReadJsonSignature(jsonEnvelope.JsonDocument);
         using var jsonDocument = JsonDocument.Parse(jsonEnvelope.JsonDocument);
         using var protectedHeader = JsonDocument.Parse(jsonEnvelope.ProtectedHeaderJson);
         var root = jsonDocument.RootElement;
@@ -242,7 +244,9 @@ public class RuntimeSmokeTests
 
         var signatures = root.GetProperty("signatures");
 
-        Assert.Equal(ValidationConclusion.Valid, verification.Conclusion);
+        Assert.Equal(ValidationConclusion.Valid, compactVerification.Conclusion);
+        Assert.Equal(ValidationConclusion.Valid, jsonVerification.Conclusion);
+        Assert.Equal(SignatureLevel.BaselineB, descriptor.Level);
         Assert.Contains('.', envelope.CompactSerialization);
         Assert.Equal(JsonValueKind.String, root.GetProperty("payload").ValueKind);
         Assert.Equal(JsonValueKind.Array, signatures.ValueKind);
@@ -253,6 +257,64 @@ public class RuntimeSmokeTests
         Assert.False(root.TryGetProperty("signature", out _));
         Assert.Equal("jose+json", protectedRoot.GetProperty("typ").GetString());
         Assert.True(protectedRoot.GetProperty("x5c").GetArrayLength() > 0);
+    }
+
+    [Fact]
+    public async Task JAdES_RuntimeSmoke_ShouldCreateAndVerifyBaselineTJsonSignature()
+    {
+        using var material = new RuntimeMaterial();
+        var service = new JAdESBaselineBService(new Rfc8785JsonCanonicalizer());
+        var request = new SignatureRequest(SignatureFormat.JAdES, SignatureLevel.BaselineB, RuntimeSmokeFixtures.JadesPayload);
+
+        var baselineBEnvelope = service.CreateDetachedJsonSignature(
+            request,
+            material.Certificate,
+            material.Key,
+            material.Suite,
+            DateTimeOffset.Parse("2026-04-14T08:15:00Z"));
+        var timestampResponse = await material.TimestampProvider.GetTimestampAsync(
+            service.CreateSignatureTimestampRequest(baselineBEnvelope, material.Suite.HashAlgorithm));
+        var baselineTEnvelope = service.AttachSignatureTimestamp(baselineBEnvelope, timestampResponse.Timestamp!);
+        var verification = service.VerifyDetachedJsonSignature(request.Payload, baselineTEnvelope.JsonDocument, material.Certificate);
+        var descriptor = service.ReadJsonSignature(baselineTEnvelope.JsonDocument);
+
+        Assert.True(timestampResponse.IsSuccess);
+        Assert.Equal(ValidationConclusion.Valid, verification.Conclusion);
+        Assert.Equal(SignatureLevel.BaselineT, descriptor.Level);
+        Assert.Single(descriptor.ValidationMaterial.Timestamps);
+    }
+
+    [Fact]
+    public async Task JAdES_RuntimeSmoke_ShouldCreateAndVerifyBaselineLTJsonSignature()
+    {
+        using var material = new RuntimeMaterial();
+        var service = new JAdESBaselineBService(new Rfc8785JsonCanonicalizer());
+        var request = new SignatureRequest(SignatureFormat.JAdES, SignatureLevel.BaselineB, RuntimeSmokeFixtures.JadesPayload);
+
+        var baselineBEnvelope = service.CreateDetachedJsonSignature(
+            request,
+            material.Certificate,
+            material.Key,
+            material.Suite,
+            DateTimeOffset.Parse("2026-04-14T08:15:00Z"));
+        var timestampResponse = await material.TimestampProvider.GetTimestampAsync(
+            service.CreateSignatureTimestampRequest(baselineBEnvelope, material.Suite.HashAlgorithm));
+        var baselineTEnvelope = service.AttachSignatureTimestamp(baselineBEnvelope, timestampResponse.Timestamp!);
+        var baselineLTEnvelope = service.AttachValidationMaterial(
+            baselineTEnvelope,
+            [material.Certificate, material.TsaCertificate],
+            [
+                CreateCrlRevocationInfo(material.Certificate, material.Key, DateTimeOffset.Parse("2026-04-14T08:16:00Z")),
+                CreateCrlRevocationInfo(material.TsaCertificate, material.TsaKey, DateTimeOffset.Parse("2026-04-14T08:17:00Z"))
+            ]);
+        var verification = service.VerifyDetachedJsonSignature(request.Payload, baselineLTEnvelope.JsonDocument, material.Certificate);
+        var descriptor = service.ReadJsonSignature(baselineLTEnvelope.JsonDocument);
+
+        Assert.True(timestampResponse.IsSuccess);
+        Assert.Equal(ValidationConclusion.Valid, verification.Conclusion);
+        Assert.Equal(SignatureLevel.BaselineLT, descriptor.Level);
+        Assert.NotEmpty(descriptor.ValidationMaterial.CertificateValues);
+        Assert.NotEmpty(descriptor.ValidationMaterial.RevocationValues);
     }
 
     [Fact]

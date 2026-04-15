@@ -10,7 +10,7 @@
 | XAdES | Yes | Yes | Yes | Çalışıyor |
 | PAdES | Yes | Yes | Yes | Çalışıyor |
 | ASiC-S | Yes | Yes | Yes | Çalışıyor |
-| JAdES | Yes | Partial | No | Baseline-B çalışıyor, T ve LT tamam değil |
+| JAdES | Yes | Yes | Yes | JSON General Serialization ile yerel doğrulama çalışıyor |
 
 ## Kurulum
 
@@ -66,4 +66,4 @@ Console.WriteLine(validation.Conclusion);
 ## Not
 
 Bu repo aktif geliştirme altındadır.
-Özellikle JAdES-T ve JAdES-LT tarafı henüz tamamlanmış değildir.
+JAdES tarafında ana artifact JSON General Serialization'dır, compact JWS çıktısı Baseline-B için yardımcı çıktı olarak korunur.

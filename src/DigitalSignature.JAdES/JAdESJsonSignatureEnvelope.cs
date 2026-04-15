@@ -8,4 +8,6 @@ public sealed record JAdESJsonSignatureEnvelope(
     string CanonicalPayload,
     string SignatureMethod,
     string DigestMethod,
-    string ProtectedHeaderJson);
+    string ProtectedHeaderJson,
+    string? HeaderJson = null,
+    JAdESGeneralJsonSerialization? Serialization = null);
