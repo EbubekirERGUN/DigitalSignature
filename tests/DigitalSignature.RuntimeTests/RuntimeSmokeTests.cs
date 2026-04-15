@@ -157,6 +157,38 @@ public class RuntimeSmokeTests
     }
 
     [Fact]
+    public async Task XAdES_RuntimeSmoke_ShouldCreateAndVerifyBaselineLTEnvelopedSignature()
+    {
+        using var material = new RuntimeMaterial();
+        var service = new XAdESBaselineBService(new ExclusiveXmlCanonicalizer());
+        var request = new SignatureRequest(SignatureFormat.XAdES, SignatureLevel.BaselineB, RuntimeSmokeFixtures.XadesPayload, MimeType: "application/xml");
+
+        var baselineBArtifact = service.CreateEnvelopedSignature(request, material.Certificate, material.Key, material.Suite);
+        var timestampResponse = await material.TimestampProvider.GetTimestampAsync(
+            service.CreateSignatureTimestampRequest(
+                System.Text.Encoding.UTF8.GetBytes(baselineBArtifact.XmlDocument),
+                material.Suite.HashAlgorithm));
+        var baselineTArtifact = service.AttachSignatureTimestamp(baselineBArtifact, timestampResponse.Timestamp!);
+        var baselineLTArtifact = service.AttachValidationMaterial(
+            baselineTArtifact,
+            [material.Certificate, material.TsaCertificate],
+            [
+                CreateCrlRevocationInfo(material.Certificate, material.Key, DateTimeOffset.Parse("2026-04-14T08:08:00Z")),
+                CreateCrlRevocationInfo(material.TsaCertificate, material.TsaKey, DateTimeOffset.Parse("2026-04-14T08:09:00Z"))
+            ]);
+        var verification = service.VerifyEnvelopedSignature(System.Text.Encoding.UTF8.GetBytes(baselineLTArtifact.XmlDocument));
+        var descriptor = service.ReadSignature(System.Text.Encoding.UTF8.GetBytes(baselineLTArtifact.XmlDocument));
+
+        Assert.True(timestampResponse.IsSuccess);
+        Assert.Equal(ValidationConclusion.Valid, verification.Conclusion);
+        Assert.Contains("CertificateValues", baselineLTArtifact.XmlDocument);
+        Assert.Contains("RevocationValues", baselineLTArtifact.XmlDocument);
+        Assert.Equal(SignatureLevel.BaselineLT, descriptor.Level);
+        Assert.NotEmpty(descriptor.ValidationMaterial.CertificateValues);
+        Assert.NotEmpty(descriptor.ValidationMaterial.RevocationValues);
+    }
+
+    [Fact]
     public void JAdES_RuntimeSmoke_ShouldCreateAndVerifyDetachedSignature()
     {
         using var material = new RuntimeMaterial();

@@ -7,8 +7,8 @@
 | Format | Baseline-B | Baseline-T | Baseline-LT | Durum |
 |---|---:|---:|---:|---|
 | CAdES | Yes | Yes | Yes | Çalışıyor |
-| XAdES | Yes | Yes | No | LT sırada |
-| PAdES | Yes | Yes | No | LT sırada |
+| XAdES | Yes | Yes | Yes | Çalışıyor |
+| PAdES | Yes | Yes | Yes | Çalışıyor |
 | ASiC-S | Yes | Yes | No | LT sırada |
 | JAdES | Yes | Partial | No | Baseline-B çalışıyor, T ve LT tamam değil |
 
@@ -66,4 +66,4 @@ Console.WriteLine(validation.Conclusion);
 ## Not
 
 Bu repo aktif geliştirme altındadır.
-Özellikle JAdES-T tarafı henüz tamamlanmış değildir.
+Özellikle JAdES-T ve JAdES-LT tarafı henüz tamamlanmış değildir.

@@ -4,6 +4,9 @@ using System.Security.Cryptography.X509Certificates;
 using System.Xml;
 using DigitalSignature.Abstractions;
 using DigitalSignature.Core;
+using Org.BouncyCastle.Asn1;
+using Org.BouncyCastle.Asn1.Ocsp;
+using Org.BouncyCastle.X509;
 
 namespace DigitalSignature.XAdES;
 
@@ -160,24 +163,64 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         return signature with { XmlDocument = xml.OuterXml };
     }
 
+    public XAdESBaselineBSignature AttachValidationMaterial(
+        XAdESBaselineBSignature signature,
+        IReadOnlyList<X509Certificate2> validationCertificates,
+        IReadOnlyList<RevocationInfo> revocationInfo)
+    {
+        ArgumentNullException.ThrowIfNull(signature);
+        ArgumentNullException.ThrowIfNull(validationCertificates);
+        ArgumentNullException.ThrowIfNull(revocationInfo);
+
+        if (validationCertificates.Count == 0)
+        {
+            throw new InvalidOperationException("XAdES Baseline-LT embedding requires validation certificates.");
+        }
+
+        if (revocationInfo.Count == 0 || revocationInfo.All(info => info.EncodedValue.IsEmpty))
+        {
+            throw new InvalidOperationException("XAdES Baseline-LT embedding requires revocation values.");
+        }
+
+        var xml = LoadXml(System.Text.Encoding.UTF8.GetBytes(signature.XmlDocument));
+        if (ReadSignatureTimestamps(xml).Count == 0)
+        {
+            throw new InvalidOperationException("XAdES Baseline-LT embedding requires an existing SignatureTimeStamp.");
+        }
+
+        var signingCertificate = GetSigningCertificate(xml);
+        AppendValidationMaterial(
+            xml,
+            NormalizeValidationCertificates(signingCertificate, validationCertificates),
+            revocationInfo);
+
+        return signature with { XmlDocument = xml.OuterXml };
+    }
+
     public SignatureDescriptor ReadSignature(ReadOnlyMemory<byte> xmlSignature)
     {
         var xml = LoadXml(xmlSignature);
         var signedProperties = GetSignedProperties(xml);
         var signingCertificate = GetSigningCertificate(xml);
         var timestamps = ReadSignatureTimestamps(xml);
+        var embeddedValidationData = ReadEmbeddedValidationData(xml, signingCertificate);
+        var level = DetermineLevel(timestamps, embeddedValidationData);
 
         return new SignatureDescriptor(
             SignatureFormat.XAdES,
-            timestamps.Count > 0 ? SignatureLevel.BaselineT : SignatureLevel.BaselineB,
+            level,
             signingCertificate is null ? null : CreateCertificateReference(signingCertificate),
             DateTimeOffset.TryParse(signedProperties?.SigningTime, out var signingTime) ? signingTime : null,
             new ValidationMaterial(
                 signingCertificate is null ? null : CreateCertificateReference(signingCertificate),
-                signingCertificate is null ? Array.Empty<SigningCertificateReference>() : [CreateCertificateReference(signingCertificate)],
-                Array.Empty<RevocationInfo>(),
+                BuildCertificateChainReferences(signingCertificate, embeddedValidationData.CertificateValues),
+                embeddedValidationData.RevocationInfo,
                 timestamps,
-                Array.Empty<ReadOnlyMemory<byte>>()));
+                Array.Empty<ReadOnlyMemory<byte>>())
+            {
+                CertificateValues = embeddedValidationData.CertificateValues,
+                RevocationValues = embeddedValidationData.RevocationValues
+            });
     }
 
     public ValidationResult VerifyEnvelopedSignature(ReadOnlyMemory<byte> xmlSignature)
@@ -273,6 +316,12 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
             if (timestampFailure is not null)
             {
                 return ValidationResult.Failure(timestampFailure);
+            }
+
+            var validationDataFailure = ValidateEmbeddedValidationData(xml, certificate);
+            if (validationDataFailure is not null)
+            {
+                return ValidationResult.Failure(validationDataFailure);
             }
 
             return ValidationResult.Success(ReadSignature(xmlSignature));
@@ -385,23 +434,7 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
 
     private void AppendSignatureTimestamp(XmlDocument xml, TimestampMaterial signatureTimestamp)
     {
-        var ns = CreateNamespaceManager(xml);
-        var qualifyingProperties = xml.SelectSingleNode("//*[local-name()='QualifyingProperties']", ns) as XmlElement
-            ?? throw new InvalidOperationException("XAdES signature is missing QualifyingProperties.");
-
-        var unsignedProperties = qualifyingProperties.SelectSingleNode("*[local-name()='UnsignedProperties']", ns) as XmlElement;
-        if (unsignedProperties is null)
-        {
-            unsignedProperties = xml.CreateElement("xades", "UnsignedProperties", XAdESNamespace);
-            qualifyingProperties.AppendChild(unsignedProperties);
-        }
-
-        var unsignedSignatureProperties = unsignedProperties.SelectSingleNode("*[local-name()='UnsignedSignatureProperties']", ns) as XmlElement;
-        if (unsignedSignatureProperties is null)
-        {
-            unsignedSignatureProperties = xml.CreateElement("xades", "UnsignedSignatureProperties", XAdESNamespace);
-            unsignedProperties.AppendChild(unsignedSignatureProperties);
-        }
+        var unsignedSignatureProperties = GetOrCreateUnsignedSignatureProperties(xml);
 
         var signatureTimeStamp = xml.CreateElement("xades", "SignatureTimeStamp", XAdESNamespace);
         signatureTimeStamp.SetAttribute("Id", $"SignatureTimeStamp-{Guid.NewGuid():N}");
@@ -415,6 +448,77 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         signatureTimeStamp.AppendChild(encapsulatedTimeStamp);
 
         unsignedSignatureProperties.AppendChild(signatureTimeStamp);
+    }
+
+    private void AppendValidationMaterial(
+        XmlDocument xml,
+        IReadOnlyList<X509Certificate2> validationCertificates,
+        IReadOnlyList<RevocationInfo> revocationInfo)
+    {
+        var unsignedSignatureProperties = GetOrCreateUnsignedSignatureProperties(xml);
+        RemoveUnsignedSignatureProperty(unsignedSignatureProperties, "CertificateValues");
+        RemoveUnsignedSignatureProperty(unsignedSignatureProperties, "RevocationValues");
+
+        var certificateValues = xml.CreateElement("xades", "CertificateValues", XAdESNamespace);
+        certificateValues.SetAttribute("Id", $"CertificateValues-{Guid.NewGuid():N}");
+
+        foreach (var certificate in validationCertificates)
+        {
+            var encapsulatedCertificate = xml.CreateElement("xades", "EncapsulatedX509Certificate", XAdESNamespace);
+            encapsulatedCertificate.InnerText = Convert.ToBase64String(certificate.RawData);
+            certificateValues.AppendChild(encapsulatedCertificate);
+        }
+
+        unsignedSignatureProperties.AppendChild(certificateValues);
+
+        var revocationValues = xml.CreateElement("xades", "RevocationValues", XAdESNamespace);
+        revocationValues.SetAttribute("Id", $"RevocationValues-{Guid.NewGuid():N}");
+
+        var crlValues = revocationInfo
+            .Where(info => !info.EncodedValue.IsEmpty && IsCrlSource(info.Source))
+            .ToArray();
+        if (crlValues.Length > 0)
+        {
+            var crlValuesElement = xml.CreateElement("xades", "CRLValues", XAdESNamespace);
+            foreach (var info in crlValues)
+            {
+                var encapsulatedCrlValue = xml.CreateElement("xades", "EncapsulatedCRLValue", XAdESNamespace);
+                encapsulatedCrlValue.InnerText = Convert.ToBase64String(info.EncodedValue.ToArray());
+                crlValuesElement.AppendChild(encapsulatedCrlValue);
+            }
+
+            revocationValues.AppendChild(crlValuesElement);
+        }
+
+        var ocspValues = revocationInfo
+            .Where(info => !info.EncodedValue.IsEmpty && IsOcspSource(info.Source))
+            .ToArray();
+        if (ocspValues.Length > 0)
+        {
+            var ocspValuesElement = xml.CreateElement("xades", "OCSPValues", XAdESNamespace);
+            foreach (var info in ocspValues)
+            {
+                var encapsulatedOcspValue = xml.CreateElement("xades", "EncapsulatedOCSPValue", XAdESNamespace);
+                encapsulatedOcspValue.InnerText = Convert.ToBase64String(info.EncodedValue.ToArray());
+                ocspValuesElement.AppendChild(encapsulatedOcspValue);
+            }
+
+            revocationValues.AppendChild(ocspValuesElement);
+        }
+
+        var unsupportedRevocationSource = revocationInfo
+            .FirstOrDefault(info => !info.EncodedValue.IsEmpty && !IsCrlSource(info.Source) && !IsOcspSource(info.Source));
+        if (unsupportedRevocationSource is not null)
+        {
+            throw new InvalidOperationException($"Unsupported revocation source '{unsupportedRevocationSource.Source}' for XAdES Baseline-LT embedding.");
+        }
+
+        if (!revocationValues.HasChildNodes)
+        {
+            throw new InvalidOperationException("XAdES Baseline-LT embedding requires CRL or OCSP values.");
+        }
+
+        unsignedSignatureProperties.AppendChild(revocationValues);
     }
 
     private byte[] ComputeDocumentReferenceDigest(XmlDocument xml, SignatureSuite suite)
@@ -491,6 +595,77 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         }
 
         return timestamps;
+    }
+
+    private static EmbeddedValidationData ReadEmbeddedValidationData(XmlDocument xml, X509Certificate2? signingCertificate)
+    {
+        var ns = CreateNamespaceManager(xml);
+        var certificateValues = new List<ReadOnlyMemory<byte>>();
+        var revocationValues = new List<ReadOnlyMemory<byte>>();
+        var revocationInfo = new List<RevocationInfo>();
+
+        var certificateNodes = xml.SelectNodes("//*[local-name()='UnsignedSignatureProperties']/*[local-name()='CertificateValues']/*[local-name()='EncapsulatedX509Certificate']", ns)?.Cast<XmlElement>()
+            ?? Array.Empty<XmlElement>();
+        foreach (var certificateNode in certificateNodes)
+        {
+            var rawValue = Convert.FromBase64String(certificateNode.InnerText);
+            using var _ = X509CertificateLoader.LoadCertificate(rawValue);
+            certificateValues.Add(rawValue);
+        }
+
+        var crlNodes = xml.SelectNodes("//*[local-name()='UnsignedSignatureProperties']/*[local-name()='RevocationValues']/*[local-name()='CRLValues']/*[local-name()='EncapsulatedCRLValue']", ns)?.Cast<XmlElement>()
+            ?? Array.Empty<XmlElement>();
+        foreach (var crlNode in crlNodes)
+        {
+            var rawValue = Convert.FromBase64String(crlNode.InnerText);
+            if (new X509CrlParser().ReadCrl(rawValue) is null)
+            {
+                throw new CryptographicException("Embedded CRL value could not be decoded.");
+            }
+
+            revocationValues.Add(rawValue);
+            revocationInfo.Add(MapCrlRevocationInfo(rawValue, signingCertificate));
+        }
+
+        var ocspNodes = xml.SelectNodes("//*[local-name()='UnsignedSignatureProperties']/*[local-name()='RevocationValues']/*[local-name()='OCSPValues']/*[local-name()='EncapsulatedOCSPValue']", ns)?.Cast<XmlElement>()
+            ?? Array.Empty<XmlElement>();
+        foreach (var ocspNode in ocspNodes)
+        {
+            var rawValue = Convert.FromBase64String(ocspNode.InnerText);
+            _ = BasicOcspResponse.GetInstance(Asn1Object.FromByteArray(rawValue));
+            revocationValues.Add(rawValue);
+            revocationInfo.Add(MapOcspRevocationInfo(rawValue));
+        }
+
+        return new EmbeddedValidationData(certificateValues, revocationInfo, revocationValues);
+    }
+
+    private static ValidationFailure? ValidateEmbeddedValidationData(XmlDocument xml, X509Certificate2? signingCertificate)
+    {
+        EmbeddedValidationData validationData;
+        try
+        {
+            validationData = ReadEmbeddedValidationData(xml, signingCertificate);
+        }
+        catch (Exception ex) when (ex is CryptographicException or InvalidOperationException or ArgumentException or FormatException)
+        {
+            return new ValidationFailure(
+                ValidationFailureKind.MalformedSignature,
+                ValidationErrorCodes.MalformedSignature,
+                $"Embedded XAdES-LT validation material could not be decoded: {ex.Message}");
+        }
+
+        var hasCertificateValues = validationData.CertificateValues.Count > 0;
+        var hasRevocationValues = validationData.RevocationValues.Count > 0;
+        if (hasCertificateValues != hasRevocationValues)
+        {
+            return new ValidationFailure(
+                ValidationFailureKind.MalformedSignature,
+                ValidationErrorCodes.MalformedSignature,
+                "XAdES embedded validation material must contain both CertificateValues and RevocationValues.");
+        }
+
+        return null;
     }
 
     private ValidationFailure? ValidateSignatureTimestamps(XmlDocument xml)
@@ -588,6 +763,40 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         return xml.SelectSingleNode("//*[local-name()='SignatureValue']", ns) as XmlElement;
     }
 
+    private static XmlElement GetOrCreateUnsignedSignatureProperties(XmlDocument xml)
+    {
+        var ns = CreateNamespaceManager(xml);
+        var qualifyingProperties = xml.SelectSingleNode("//*[local-name()='QualifyingProperties']", ns) as XmlElement
+            ?? throw new InvalidOperationException("XAdES signature is missing QualifyingProperties.");
+
+        var unsignedProperties = qualifyingProperties.SelectSingleNode("*[local-name()='UnsignedProperties']", ns) as XmlElement;
+        if (unsignedProperties is null)
+        {
+            unsignedProperties = xml.CreateElement("xades", "UnsignedProperties", XAdESNamespace);
+            qualifyingProperties.AppendChild(unsignedProperties);
+        }
+
+        var unsignedSignatureProperties = unsignedProperties.SelectSingleNode("*[local-name()='UnsignedSignatureProperties']", ns) as XmlElement;
+        if (unsignedSignatureProperties is null)
+        {
+            unsignedSignatureProperties = xml.CreateElement("xades", "UnsignedSignatureProperties", XAdESNamespace);
+            unsignedProperties.AppendChild(unsignedSignatureProperties);
+        }
+
+        return unsignedSignatureProperties;
+    }
+
+    private static void RemoveUnsignedSignatureProperty(XmlElement unsignedSignatureProperties, string localName)
+    {
+        var nodes = unsignedSignatureProperties.SelectNodes($"*[local-name()='{localName}']")?.Cast<XmlNode>().ToArray()
+            ?? Array.Empty<XmlNode>();
+
+        foreach (var node in nodes)
+        {
+            unsignedSignatureProperties.RemoveChild(node);
+        }
+    }
+
     private static XAdESSignedProperties? GetSignedProperties(XmlDocument xml)
     {
         var ns = CreateNamespaceManager(xml);
@@ -660,6 +869,114 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         certificate.NotBefore.ToUniversalTime().ToString("O"),
         certificate.NotAfter.ToUniversalTime().ToString("O"));
 
+    private static IReadOnlyList<SigningCertificateReference> BuildCertificateChainReferences(
+        X509Certificate2? signingCertificate,
+        IReadOnlyList<ReadOnlyMemory<byte>> certificateValues)
+    {
+        var chain = new List<SigningCertificateReference>();
+        var seenThumbprints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (signingCertificate is not null)
+        {
+            AddCertificateReference(chain, seenThumbprints, signingCertificate);
+        }
+
+        foreach (var rawValue in certificateValues)
+        {
+            using var certificate = X509CertificateLoader.LoadCertificate(rawValue.Span);
+            AddCertificateReference(chain, seenThumbprints, certificate);
+        }
+
+        return chain;
+    }
+
+    private static void AddCertificateReference(
+        ICollection<SigningCertificateReference> chain,
+        ISet<string> seenThumbprints,
+        X509Certificate2 certificate)
+    {
+        if (!seenThumbprints.Add(certificate.Thumbprint))
+        {
+            return;
+        }
+
+        chain.Add(CreateCertificateReference(certificate));
+    }
+
+    private static IReadOnlyList<X509Certificate2> NormalizeValidationCertificates(
+        X509Certificate2? signingCertificate,
+        IReadOnlyList<X509Certificate2>? validationCertificates)
+    {
+        var certificates = new List<X509Certificate2>();
+        if (signingCertificate is not null)
+        {
+            certificates.Add(signingCertificate);
+        }
+
+        if (validationCertificates is not null)
+        {
+            certificates.AddRange(validationCertificates);
+        }
+
+        return certificates
+            .GroupBy(certificate => certificate.Thumbprint, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
+    }
+
+    private static RevocationInfo MapCrlRevocationInfo(byte[] rawValue, X509Certificate2? signingCertificate)
+    {
+        var crl = new X509CrlParser().ReadCrl(rawValue) ?? throw new CryptographicException("Embedded CRL value could not be decoded.");
+        bool? isRevoked = null;
+
+        if (signingCertificate is not null)
+        {
+            var bcCertificate = new X509CertificateParser().ReadCertificate(signingCertificate.RawData);
+            if (StringComparer.OrdinalIgnoreCase.Equals(crl.IssuerDN.ToString(), bcCertificate.IssuerDN.ToString()))
+            {
+                isRevoked = crl.IsRevoked(bcCertificate);
+            }
+        }
+
+        return new RevocationInfo(
+            "CRL",
+            new DateTimeOffset(crl.ThisUpdate.ToUniversalTime()),
+            crl.NextUpdate is null ? null : new DateTimeOffset(crl.NextUpdate.Value.ToUniversalTime()),
+            isRevoked,
+            null)
+        {
+            EncodedValue = rawValue
+        };
+    }
+
+    private static RevocationInfo MapOcspRevocationInfo(byte[] rawValue)
+    {
+        var response = BasicOcspResponse.GetInstance(Asn1Object.FromByteArray(rawValue));
+        return new RevocationInfo(
+            "OCSP",
+            new DateTimeOffset(response.TbsResponseData.ProducedAt.ToDateTime().ToUniversalTime()),
+            null,
+            null,
+            null)
+        {
+            EncodedValue = rawValue
+        };
+    }
+
+    private static SignatureLevel DetermineLevel(
+        IReadOnlyList<TimestampMaterial> timestamps,
+        EmbeddedValidationData validationData)
+    {
+        if (timestamps.Count > 0 && validationData.CertificateValues.Count > 0 && validationData.RevocationValues.Count > 0)
+        {
+            return SignatureLevel.BaselineLT;
+        }
+
+        return timestamps.Count > 0
+            ? SignatureLevel.BaselineT
+            : SignatureLevel.BaselineB;
+    }
+
     private static HashAlgorithmName ToHashAlgorithmName(HashAlgorithmIdentifier algorithm) => algorithm switch
     {
         HashAlgorithmIdentifier.Sha256 => HashAlgorithmName.SHA256,
@@ -728,9 +1045,17 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         _ => oid
     };
 
+    private static bool IsCrlSource(string source) => source.Contains("CRL", StringComparison.OrdinalIgnoreCase);
+    private static bool IsOcspSource(string source) => source.Contains("OCSP", StringComparison.OrdinalIgnoreCase);
+
     private const string XmlDsigNamespace = "http://www.w3.org/2000/09/xmldsig#";
     private const string XAdESNamespace = "http://uri.etsi.org/01903/v1.3.2#";
     private const string SignedPropertiesTypeUri = "http://uri.etsi.org/01903#SignedProperties";
     private const string XmlDsigExcC14NTransformUrl = "http://www.w3.org/2001/10/xml-exc-c14n#";
     private const string XmlDsigEnvelopedSignatureTransformUrl = "http://www.w3.org/2000/09/xmldsig#enveloped-signature";
+
+    private sealed record EmbeddedValidationData(
+        IReadOnlyList<ReadOnlyMemory<byte>> CertificateValues,
+        IReadOnlyList<RevocationInfo> RevocationInfo,
+        IReadOnlyList<ReadOnlyMemory<byte>> RevocationValues);
 }

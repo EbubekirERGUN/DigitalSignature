@@ -5,6 +5,9 @@ using DigitalSignature.Abstractions;
 using DigitalSignature.Core;
 using DigitalSignature.Validation;
 using DigitalSignature.XAdES;
+using Org.BouncyCastle.Crypto.Operators;
+using Org.BouncyCastle.Security;
+using Org.BouncyCastle.X509;
 
 namespace DigitalSignature.XAdES.Tests;
 
@@ -107,6 +110,57 @@ public class XAdESBaselineBValidatorTests
         Assert.Single(result.Validation.Signature.ValidationMaterial.Timestamps);
     }
 
+    [Fact]
+    public async Task ValidateAsync_ShouldReturnBaselineLT_WhenValidationMaterialIsEmbedded()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=XAdES Validation Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=XAdES Validation TSA");
+
+        var service = new XAdESBaselineBService(new ExclusiveXmlCanonicalizer());
+        var validator = new XAdESBaselineBValidator(
+            service,
+            new SignatureValidationEngine(
+                new StubCertificateChainValidator(certificate),
+                new StubTrustAnchorProvider(certificate)));
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate);
+
+        var request = new SignatureRequest(
+            SignatureFormat.XAdES,
+            SignatureLevel.BaselineB,
+            Encoding.UTF8.GetBytes("<Invoice Id=\"doc-4\"><Total>168</Total></Invoice>"),
+            MimeType: "application/xml");
+        var suite = new SignatureSuite(
+            SignatureAlgorithmIdentifier.RsaPkcs1,
+            HashAlgorithmIdentifier.Sha256,
+            2048);
+        var baselineBSignature = service.CreateEnvelopedSignature(request, certificate, rsa, suite);
+        var timestampResponse = await timestampProvider.GetTimestampAsync(
+            service.CreateSignatureTimestampRequest(
+                Encoding.UTF8.GetBytes(baselineBSignature.XmlDocument),
+                suite.HashAlgorithm));
+        var baselineTSignature = service.AttachSignatureTimestamp(baselineBSignature, timestampResponse.Timestamp!);
+        var baselineLTSignature = service.AttachValidationMaterial(
+            baselineTSignature,
+            [certificate, tsaCertificate],
+            [
+                CreateCrlRevocationInfo(certificate, rsa, DateTimeOffset.Parse("2026-04-15T12:35:00Z")),
+                CreateCrlRevocationInfo(tsaCertificate, tsaKey, DateTimeOffset.Parse("2026-04-15T12:36:00Z"))
+            ]);
+
+        var result = await validator.ValidateAsync(
+            Encoding.UTF8.GetBytes(baselineLTSignature.XmlDocument),
+            TemporalValidationContext.ForSigningTime(DateTimeOffset.UtcNow, null));
+
+        Assert.True(timestampResponse.IsSuccess);
+        Assert.Equal(ValidationConclusion.Valid, result.Validation.Conclusion);
+        Assert.NotNull(result.Validation.Signature);
+        Assert.Equal(SignatureLevel.BaselineLT, result.Validation.Signature!.Level);
+        Assert.NotEmpty(result.Validation.Signature.ValidationMaterial.CertificateValues);
+        Assert.NotEmpty(result.Validation.Signature.ValidationMaterial.RevocationValues);
+    }
+
     private static X509Certificate2 CreateSelfSignedCertificate(RSA rsa, string subjectName)
     {
         var request = new CertificateRequest(subjectName, rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
@@ -124,6 +178,28 @@ public class XAdESBaselineBValidatorTests
         request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.NonRepudiation, true));
         request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(new OidCollection { new("1.3.6.1.5.5.7.3.8") }, true));
         return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+    }
+
+    private static RevocationInfo CreateCrlRevocationInfo(
+        X509Certificate2 certificate,
+        RSA issuerKey,
+        DateTimeOffset thisUpdate)
+    {
+        var generator = new X509V2CrlGenerator();
+        generator.SetIssuerDN(DotNetUtilities.FromX509Certificate(certificate).SubjectDN);
+        generator.SetThisUpdate(thisUpdate.UtcDateTime);
+        generator.SetNextUpdate(thisUpdate.AddDays(7).UtcDateTime);
+
+        var crl = generator.Generate(new Asn1SignatureFactory("SHA256WITHRSA", DotNetUtilities.GetRsaKeyPair(issuerKey).Private));
+        return new RevocationInfo(
+            "CRL",
+            thisUpdate,
+            thisUpdate.AddDays(7),
+            false,
+            null)
+        {
+            EncodedValue = crl.GetEncoded()
+        };
     }
 
     private sealed class StubTrustAnchorProvider(params X509Certificate2[] anchors) : ITrustAnchorProvider
