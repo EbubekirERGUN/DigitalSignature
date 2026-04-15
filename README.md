@@ -9,7 +9,7 @@
 | CAdES | Yes | Yes | Yes | Çalışıyor |
 | XAdES | Yes | Yes | Yes | Çalışıyor |
 | PAdES | Yes | Yes | Yes | Çalışıyor |
-| ASiC-S | Yes | Yes | No | LT sırada |
+| ASiC-S | Yes | Yes | Yes | Çalışıyor |
 | JAdES | Yes | Partial | No | Baseline-B çalışıyor, T ve LT tamam değil |
 
 ## Kurulum

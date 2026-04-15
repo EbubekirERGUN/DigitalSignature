@@ -24,7 +24,9 @@ public sealed class ASiCSBaselineBService
         RSA privateKey,
         SignatureSuite suite,
         DateTimeOffset? signingTime = null,
-        TimestampMaterial? signatureTimestamp = null)
+        TimestampMaterial? signatureTimestamp = null,
+        IReadOnlyList<X509Certificate2>? validationCertificates = null,
+        IReadOnlyList<RevocationInfo>? revocationInfo = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(signingCertificate);
@@ -36,9 +38,9 @@ public sealed class ASiCSBaselineBService
             throw new ArgumentException("ASiC service only accepts ASiC requests.", nameof(request));
         }
 
-        if (request.Level is not SignatureLevel.BaselineB and not SignatureLevel.BaselineT)
+        if (request.Level is not SignatureLevel.BaselineB and not SignatureLevel.BaselineT and not SignatureLevel.BaselineLT)
         {
-            throw new ArgumentException("ASiC signing currently supports only SignatureLevel.BaselineB and SignatureLevel.BaselineT.", nameof(request));
+            throw new ArgumentException("ASiC signing currently supports only SignatureLevel.BaselineB, SignatureLevel.BaselineT and SignatureLevel.BaselineLT.", nameof(request));
         }
 
         if (!suite.IsRsa)
@@ -46,9 +48,14 @@ public sealed class ASiCSBaselineBService
             throw new NotSupportedException("Only RSA signature suites are supported for ASiC Baseline signatures in the current implementation.");
         }
 
-        if (request.Level == SignatureLevel.BaselineT && signatureTimestamp is null)
+        if (request.Level is SignatureLevel.BaselineT or SignatureLevel.BaselineLT && signatureTimestamp is null)
         {
-            throw new InvalidOperationException("ASiC Baseline-T signing requires a CAdES signature timestamp token.");
+            throw new InvalidOperationException($"ASiC {request.Level} signing requires a CAdES signature timestamp token.");
+        }
+
+        if (request.Level == SignatureLevel.BaselineLT && (revocationInfo is null || revocationInfo.Count == 0 || revocationInfo.All(info => info.EncodedValue.IsEmpty)))
+        {
+            throw new InvalidOperationException("ASiC Baseline-LT signing requires embedded revocation values for the CAdES signature.");
         }
 
         var normalizedPayloadEntryName = NormalizePayloadEntryName(payloadEntryName);
@@ -59,7 +66,15 @@ public sealed class ASiCSBaselineBService
             request.MimeType,
             "detached");
 
-        var signature = _cadesService.CreateDetachedSignature(cadesRequest, signingCertificate, privateKey, suite, signingTime, signatureTimestamp);
+        var signature = _cadesService.CreateDetachedSignature(
+            cadesRequest,
+            signingCertificate,
+            privateKey,
+            suite,
+            signingTime,
+            signatureTimestamp,
+            validationCertificates,
+            revocationInfo);
         var createdAt = signingTime ?? signatureTimestamp?.CreatedAt ?? DateTimeOffset.UtcNow;
         var containerBytes = StoredZipContainerBuilder.Build(
             [

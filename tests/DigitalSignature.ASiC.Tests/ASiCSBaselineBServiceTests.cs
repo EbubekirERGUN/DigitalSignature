@@ -4,6 +4,9 @@ using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
 using DigitalSignature.Abstractions;
 using DigitalSignature.Core;
+using Org.BouncyCastle.Crypto.Operators;
+using Org.BouncyCastle.Security;
+using Org.BouncyCastle.X509;
 
 namespace DigitalSignature.ASiC.Tests;
 
@@ -83,6 +86,49 @@ public class ASiCSBaselineBServiceTests
         Assert.NotNull(verification.Validation.Signature);
         Assert.Equal(SignatureLevel.BaselineT, verification.Validation.Signature!.Level);
         Assert.Single(verification.Validation.Signature.ValidationMaterial.Timestamps);
+    }
+
+    [Fact]
+    public async Task CreateContainer_ShouldProduceBaselineLTArtifact_WhenValidationDataIsProvided()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=ASiC Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=ASiC Test TSA");
+
+        var service = new DigitalSignature.ASiC.ASiCSBaselineBService();
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate, fixedTimestamp: DateTimeOffset.Parse("2026-04-16T00:20:00Z"));
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048, IsRecommended: true);
+        var payload = "Hello ASiC-LT"u8.ToArray();
+        var baselineBRequest = new SignatureRequest(SignatureFormat.ASiC, SignatureLevel.BaselineB, payload, MimeType: "text/plain");
+
+        var signingTime = DateTimeOffset.Parse("2026-04-16T00:00:00Z");
+        var baselineBArtifact = service.CreateContainer(baselineBRequest, "document.txt", certificate, rsa, suite, signingTime);
+        var timestamp = await CreateTimestampForContainerSignatureAsync(baselineBArtifact.Container.Data, payload, timestampProvider);
+
+        var baselineLTArtifact = service.CreateContainer(
+            baselineBRequest with { Level = SignatureLevel.BaselineLT },
+            "document.txt",
+            certificate,
+            rsa,
+            suite,
+            signingTime,
+            signatureTimestamp: timestamp,
+            validationCertificates: [certificate, tsaCertificate],
+            revocationInfo:
+            [
+                CreateCrlRevocationInfo(certificate, rsa, DateTimeOffset.Parse("2026-04-16T00:05:00Z")),
+                CreateCrlRevocationInfo(tsaCertificate, tsaKey, DateTimeOffset.Parse("2026-04-16T00:06:00Z"))
+            ]);
+
+        var verification = service.VerifyContainer(baselineLTArtifact.Container.Data);
+
+        Assert.Equal(SignatureLevel.BaselineLT, baselineLTArtifact.Container.Level);
+        Assert.Equal(ValidationConclusion.Valid, verification.Validation.Conclusion);
+        Assert.NotNull(verification.Validation.Signature);
+        Assert.Equal(SignatureLevel.BaselineLT, verification.Validation.Signature!.Level);
+        Assert.NotEmpty(verification.Validation.Signature.ValidationMaterial.CertificateValues);
+        Assert.NotEmpty(verification.Validation.Signature.ValidationMaterial.RevocationValues);
     }
 
     [Fact]
@@ -222,5 +268,27 @@ public class ASiCSBaselineBServiceTests
         request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(enhancedKeyUsages, true));
 
         return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+    }
+
+    private static RevocationInfo CreateCrlRevocationInfo(
+        X509Certificate2 certificate,
+        RSA issuerKey,
+        DateTimeOffset thisUpdate)
+    {
+        var generator = new X509V2CrlGenerator();
+        generator.SetIssuerDN(DotNetUtilities.FromX509Certificate(certificate).SubjectDN);
+        generator.SetThisUpdate(thisUpdate.UtcDateTime);
+        generator.SetNextUpdate(thisUpdate.AddDays(7).UtcDateTime);
+
+        var crl = generator.Generate(new Asn1SignatureFactory("SHA256WITHRSA", DotNetUtilities.GetRsaKeyPair(issuerKey).Private));
+        return new RevocationInfo(
+            "CRL",
+            thisUpdate,
+            thisUpdate.AddDays(7),
+            false,
+            null)
+        {
+            EncodedValue = crl.GetEncoded()
+        };
     }
 }

@@ -64,6 +64,43 @@ public class RuntimeSmokeTests
     }
 
     [Fact]
+    public async Task ASiC_RuntimeSmoke_ShouldCreateAndVerifyBaselineLTContainer()
+    {
+        using var material = new RuntimeMaterial();
+        var service = new ASiCSBaselineBService();
+        var baselineBRequest = new SignatureRequest(SignatureFormat.ASiC, SignatureLevel.BaselineB, RuntimeSmokeFixtures.AsicPayload);
+
+        var signingTime = DateTimeOffset.Parse("2026-04-14T08:01:00Z");
+        var baselineBArtifact = service.CreateContainer(baselineBRequest, "runtime-lt.txt", material.Certificate, material.Key, material.Suite, signingTime);
+        var timestampMaterial = await CreateTimestampForDetachedSignatureInsideContainerAsync(
+            baselineBArtifact.Container.Data,
+            baselineBRequest.Payload,
+            material.TimestampProvider);
+
+        var baselineLTArtifact = service.CreateContainer(
+            baselineBRequest with { Level = SignatureLevel.BaselineLT },
+            "runtime-lt.txt",
+            material.Certificate,
+            material.Key,
+            material.Suite,
+            signingTime,
+            signatureTimestamp: timestampMaterial,
+            validationCertificates: [material.Certificate, material.TsaCertificate],
+            revocationInfo:
+            [
+                CreateCrlRevocationInfo(material.Certificate, material.Key, DateTimeOffset.Parse("2026-04-14T08:02:00Z")),
+                CreateCrlRevocationInfo(material.TsaCertificate, material.TsaKey, DateTimeOffset.Parse("2026-04-14T08:03:00Z"))
+            ]);
+        var verification = service.VerifyContainer(baselineLTArtifact.Container.Data);
+
+        Assert.Equal(ValidationConclusion.Valid, verification.Validation.Conclusion);
+        Assert.NotNull(verification.Validation.Signature);
+        Assert.Equal(SignatureLevel.BaselineLT, verification.Validation.Signature!.Level);
+        Assert.NotEmpty(verification.Validation.Signature.ValidationMaterial.CertificateValues);
+        Assert.NotEmpty(verification.Validation.Signature.ValidationMaterial.RevocationValues);
+    }
+
+    [Fact]
     public void CAdES_RuntimeSmoke_ShouldCreateAndVerifyDetachedSignature()
     {
         using var material = new RuntimeMaterial();
