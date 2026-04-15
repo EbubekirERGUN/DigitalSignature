@@ -1,8 +1,25 @@
 # DigitalSignature
 
+![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet)
+![ETSI Checker](https://img.shields.io/badge/ETSI%20Checker-15%2F15%20PASS-2ea44f)
+![Profiles](https://img.shields.io/badge/Profiles-B%20%7C%20T%20%7C%20LT-1f6feb)
+![Formats](https://img.shields.io/badge/Formats-CAdES%20%7C%20XAdES%20%7C%20PAdES%20%7C%20JAdES%20%7C%20ASiC--S-6f42c1)
+
 DigitalSignature is a .NET 10 digital signature toolkit for CAdES, XAdES, PAdES, JAdES, and ASiC-S.
 
 It focuses on practical ETSI-style signing and validation flows, with local verification and runtime-generated artifacts checked against the ETSI Conformance Checker.
+
+## Why this project?
+
+DigitalSignature is built for teams that want one consistent .NET codebase for multiple ETSI-oriented signature formats instead of separate, format-specific implementations.
+
+It is designed around a few practical goals:
+
+- keep the programming model consistent across signature families
+- generate real runtime artifacts, not only unit-test-only structures
+- validate outputs locally and against the ETSI Conformance Checker
+- share signing, timestamp, augmentation, and validation foundations across formats
+- keep the codebase modular enough for package-oriented consumption
 
 ## Highlights
 
@@ -23,6 +40,34 @@ The current runtime artifact set passes both local verification and a fresh ETSI
 | PAdES | Yes | Yes | Yes | Pass | Pass | LT includes PDF DSS and VRI embedding |
 | ASiC-S | Yes | Yes | Yes | Pass | Pass | Single-file container with embedded CAdES signature |
 | JAdES | Yes | Yes | Yes | Pass | Pass | Primary artifact is JSON General Serialization |
+
+## Architecture overview
+
+```mermaid
+flowchart LR
+    A[Application] --> B[DigitalSignature.Abstractions]
+    B --> C[DigitalSignature.Core]
+
+    C --> C1[DigitalSignature.CAdES]
+    C --> C2[DigitalSignature.XAdES]
+    C --> C3[DigitalSignature.PAdES]
+    C --> C4[DigitalSignature.JAdES]
+    C --> C5[DigitalSignature.ASiC]
+
+    C1 --> V[DigitalSignature.Validation]
+    C2 --> V
+    C3 --> V
+    C4 --> V
+    C5 --> V
+
+    V --> R[Validation results and reports]
+    C1 --> O[Runtime artifacts]
+    C2 --> O
+    C3 --> O
+    C4 --> O
+    C5 --> O
+    O --> E[ETSI Conformance Checker]
+```
 
 ## Build and test
 
@@ -73,6 +118,28 @@ var validation = service.VerifyDetachedSignature(payload, signature.Data);
 Console.WriteLine(validation.Conclusion);
 ```
 
+## NuGet-friendly module layout
+
+The solution is already split into package-sized modules, so consumers can take only the parts they need.
+
+- `DigitalSignature.Abstractions`
+- `DigitalSignature.Core`
+- `DigitalSignature.CAdES`
+- `DigitalSignature.XAdES`
+- `DigitalSignature.PAdES`
+- `DigitalSignature.JAdES`
+- `DigitalSignature.ASiC`
+- `DigitalSignature.Validation`
+
+A typical consumer shape looks like this:
+
+- **CAdES only**: `Abstractions + Core + CAdES`
+- **PAdES with validation**: `Abstractions + Core + CAdES + PAdES + Validation`
+- **JAdES only**: `Abstractions + Core + JAdES + Validation`
+- **Full toolkit**: all format modules plus `Validation`
+
+Today, the repository is consumed directly from source/projects. The current module boundaries are intentionally aligned for clean future package publication.
+
 ## Repository layout
 
 - `src/DigitalSignature.Abstractions` - shared contracts and signature models
@@ -85,7 +152,7 @@ Console.WriteLine(validation.Conclusion);
 - `src/DigitalSignature.Validation` - validation pipeline and reporting components
 - `tests/` - unit, integration, and runtime smoke tests
 
-## Current scope
+## Scope and non-goals
 
 DigitalSignature currently targets:
 
