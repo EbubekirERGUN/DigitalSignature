@@ -133,6 +133,56 @@ public class XAdESBaselineBServiceTests
     }
 
     [Fact]
+    public async Task AttachArchiveTimestamp_ShouldProduceBaselineLTADescriptor_AndValidVerification()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=XAdES Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=XAdES Test TSA");
+
+        var service = new XAdESBaselineBService(new ExclusiveXmlCanonicalizer());
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate, fixedTimestamp: DateTimeOffset.Parse("2026-04-16T09:45:00Z"));
+        var request = new SignatureRequest(
+            SignatureFormat.XAdES,
+            SignatureLevel.BaselineB,
+            Encoding.UTF8.GetBytes("<Invoice Id=\"doc-4\"><Total>168</Total></Invoice>"),
+            MimeType: "application/xml");
+        var suite = new SignatureSuite(
+            SignatureAlgorithmIdentifier.RsaPkcs1,
+            HashAlgorithmIdentifier.Sha256,
+            2048,
+            IsRecommended: true);
+
+        var baselineBSignature = service.CreateEnvelopedSignature(request, certificate, rsa, suite, DateTimeOffset.Parse("2026-04-16T09:30:00Z"));
+        var timestampRequest = service.CreateSignatureTimestampRequest(
+            Encoding.UTF8.GetBytes(baselineBSignature.XmlDocument),
+            suite.HashAlgorithm);
+        var timestampResponse = await timestampProvider.GetTimestampAsync(timestampRequest);
+        var baselineTSignature = service.AttachSignatureTimestamp(baselineBSignature, timestampResponse.Timestamp!);
+        var baselineLTSignature = service.AttachValidationMaterial(
+            baselineTSignature,
+            [certificate, tsaCertificate],
+            [
+                CreateCrlRevocationInfo(certificate, rsa, DateTimeOffset.Parse("2026-04-16T09:35:00Z")),
+                CreateCrlRevocationInfo(tsaCertificate, tsaKey, DateTimeOffset.Parse("2026-04-16T09:36:00Z"))
+            ]);
+        var archiveTimestampResponse = await timestampProvider.GetTimestampAsync(
+            service.CreateArchiveTimestampRequest(
+                Encoding.UTF8.GetBytes(baselineLTSignature.XmlDocument),
+                suite.HashAlgorithm));
+        var baselineLTASignature = service.AttachArchiveTimestamp(baselineLTSignature, archiveTimestampResponse.Timestamp!);
+        var descriptor = service.ReadSignature(Encoding.UTF8.GetBytes(baselineLTASignature.XmlDocument));
+        var validation = service.VerifyEnvelopedSignature(Encoding.UTF8.GetBytes(baselineLTASignature.XmlDocument));
+
+        Assert.True(archiveTimestampResponse.IsSuccess);
+        Assert.Contains("ArchiveTimeStamp", baselineLTASignature.XmlDocument);
+        Assert.Contains("EncapsulatedTimeStamp", baselineLTASignature.XmlDocument);
+        Assert.Equal(SignatureLevel.BaselineLTA, descriptor.Level);
+        Assert.Single(descriptor.ValidationMaterial.ArchiveTimestamps);
+        Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
+    }
+
+    [Fact]
     public void VerifyEnvelopedSignature_ShouldFail_WhenSignedPropertiesReferenceIsMissing()
     {
         var service = new XAdESBaselineBService(new ExclusiveXmlCanonicalizer());

@@ -1,3 +1,4 @@
+using System.IO;
 using System.Security.Cryptography;
 using System.Security.Cryptography.Pkcs;
 using System.Security.Cryptography.X509Certificates;
@@ -197,14 +198,63 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         return signature with { XmlDocument = xml.OuterXml };
     }
 
+    public TimestampRequest CreateArchiveTimestampRequest(
+        ReadOnlyMemory<byte> xmlSignature,
+        HashAlgorithmIdentifier hashAlgorithm,
+        string? policyOid = null,
+        string? nonce = null,
+        bool requireCertificate = true)
+    {
+        var xml = LoadXml(xmlSignature);
+        EnsureCanAttachArchiveTimestamp(xml);
+
+        return new TimestampRequest(
+            HashData(ComputeArchiveTimestampCanonicalizedValue(xml), hashAlgorithm),
+            GetTimestampHashAlgorithmName(hashAlgorithm),
+            policyOid,
+            nonce,
+            requireCertificate);
+    }
+
+    public XAdESBaselineBSignature AttachArchiveTimestamp(
+        XAdESBaselineBSignature signature,
+        TimestampMaterial archiveTimestamp)
+    {
+        ArgumentNullException.ThrowIfNull(signature);
+        ArgumentNullException.ThrowIfNull(archiveTimestamp);
+
+        if (archiveTimestamp.Token.IsEmpty)
+        {
+            throw new InvalidOperationException("Archive timestamp token cannot be empty.");
+        }
+
+        var xml = LoadXml(System.Text.Encoding.UTF8.GetBytes(signature.XmlDocument));
+        EnsureCanAttachArchiveTimestamp(xml);
+        var canonicalizedArchiveData = ComputeArchiveTimestampCanonicalizedValue(xml);
+
+        if (!Rfc3161TimestampToken.TryDecode(archiveTimestamp.Token, out var timestampToken, out _))
+        {
+            throw new InvalidOperationException("Archive timestamp token must be a decodable RFC 3161 token.");
+        }
+
+        if (!timestampToken!.VerifySignatureForData(canonicalizedArchiveData, out _, null))
+        {
+            throw new InvalidOperationException("Archive timestamp token does not match the canonicalized XAdES-LT covered bytes.");
+        }
+
+        AppendArchiveTimestamp(xml, archiveTimestamp);
+        return signature with { XmlDocument = xml.OuterXml };
+    }
+
     public SignatureDescriptor ReadSignature(ReadOnlyMemory<byte> xmlSignature)
     {
         var xml = LoadXml(xmlSignature);
         var signedProperties = GetSignedProperties(xml);
         var signingCertificate = GetSigningCertificate(xml);
         var timestamps = ReadSignatureTimestamps(xml);
+        var archiveTimestamps = ReadArchiveTimestamps(xml);
         var embeddedValidationData = ReadEmbeddedValidationData(xml, signingCertificate);
-        var level = DetermineLevel(timestamps, embeddedValidationData);
+        var level = DetermineLevel(timestamps, embeddedValidationData, archiveTimestamps);
 
         return new SignatureDescriptor(
             SignatureFormat.XAdES,
@@ -218,6 +268,7 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
                 timestamps,
                 Array.Empty<ReadOnlyMemory<byte>>())
             {
+                ArchiveTimestamps = archiveTimestamps,
                 CertificateValues = embeddedValidationData.CertificateValues,
                 RevocationValues = embeddedValidationData.RevocationValues
             });
@@ -322,6 +373,12 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
             if (validationDataFailure is not null)
             {
                 return ValidationResult.Failure(validationDataFailure);
+            }
+
+            var archiveTimestampFailure = ValidateArchiveTimestamps(xml);
+            if (archiveTimestampFailure is not null)
+            {
+                return ValidationResult.Failure(archiveTimestampFailure);
             }
 
             return ValidationResult.Success(ReadSignature(xmlSignature));
@@ -521,14 +578,35 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         unsignedSignatureProperties.AppendChild(revocationValues);
     }
 
+    private void AppendArchiveTimestamp(XmlDocument xml, TimestampMaterial archiveTimestamp)
+    {
+        var unsignedSignatureProperties = GetOrCreateUnsignedSignatureProperties(xml);
+
+        var archiveTimestampElement = xml.CreateElement("xades141", "ArchiveTimeStamp", XAdES141Namespace);
+        archiveTimestampElement.SetAttribute("Id", $"ArchiveTimeStamp-{Guid.NewGuid():N}");
+
+        var canonicalizationMethod = xml.CreateElement("ds", "CanonicalizationMethod", XmlDsigNamespace);
+        canonicalizationMethod.SetAttribute("Algorithm", XmlDsigExcC14NTransformUrl);
+        archiveTimestampElement.AppendChild(canonicalizationMethod);
+
+        var encapsulatedTimeStamp = xml.CreateElement("xades", "EncapsulatedTimeStamp", XAdESNamespace);
+        encapsulatedTimeStamp.SetAttribute("Id", $"EncapsulatedTimeStamp-{Guid.NewGuid():N}");
+        encapsulatedTimeStamp.InnerText = Convert.ToBase64String(archiveTimestamp.Token.ToArray());
+        archiveTimestampElement.AppendChild(encapsulatedTimeStamp);
+
+        unsignedSignatureProperties.AppendChild(archiveTimestampElement);
+    }
+
     private byte[] ComputeDocumentReferenceDigest(XmlDocument xml, SignatureSuite suite)
+        => HashData(ComputeDocumentReferenceCanonicalizedValue(xml), suite.HashAlgorithm);
+
+    private byte[] ComputeDocumentReferenceCanonicalizedValue(XmlDocument xml)
     {
         var clone = new XmlDocument { PreserveWhitespace = true };
         clone.LoadXml(xml.OuterXml);
         var signatureNode = clone.SelectSingleNode("/*/*[local-name()='Signature']");
         signatureNode?.ParentNode?.RemoveChild(signatureNode);
-        var canonicalized = canonicalizer.Canonicalize(clone.DocumentElement!);
-        return HashData(canonicalized, suite.HashAlgorithm);
+        return canonicalizer.Canonicalize(clone.DocumentElement!);
     }
 
     private byte[] ComputeSignedPropertiesDigest(XmlElement signedPropertiesElement, SignatureSuite suite)
@@ -562,6 +640,46 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         var ns = CreateNamespaceManager(xml);
         var timestamps = new List<TimestampMaterial>();
         var timestampNodes = xml.SelectNodes("//*[local-name()='UnsignedSignatureProperties']/*[local-name()='SignatureTimeStamp']", ns)?.Cast<XmlElement>()
+            ?? Array.Empty<XmlElement>();
+
+        foreach (var timestampNode in timestampNodes)
+        {
+            var encodedToken = timestampNode.SelectSingleNode("*[local-name()='EncapsulatedTimeStamp']", ns)?.InnerText;
+            if (string.IsNullOrWhiteSpace(encodedToken))
+            {
+                continue;
+            }
+
+            byte[] tokenBytes;
+            try
+            {
+                tokenBytes = Convert.FromBase64String(encodedToken);
+            }
+            catch (FormatException)
+            {
+                continue;
+            }
+
+            if (!Rfc3161TimestampToken.TryDecode(tokenBytes, out var timestampToken, out _))
+            {
+                continue;
+            }
+
+            timestamps.Add(new TimestampMaterial(
+                tokenBytes,
+                timestampToken!.TokenInfo.Timestamp,
+                timestampToken.TokenInfo.PolicyId?.Value,
+                GetDigestFromOid(timestampToken.TokenInfo.HashAlgorithmId?.Value)));
+        }
+
+        return timestamps;
+    }
+
+    private static IReadOnlyList<TimestampMaterial> ReadArchiveTimestamps(XmlDocument xml)
+    {
+        var ns = CreateNamespaceManager(xml);
+        var timestamps = new List<TimestampMaterial>();
+        var timestampNodes = xml.SelectNodes("//*[local-name()='UnsignedSignatureProperties']/*[local-name()='ArchiveTimeStamp']", ns)?.Cast<XmlElement>()
             ?? Array.Empty<XmlElement>();
 
         foreach (var timestampNode in timestampNodes)
@@ -734,6 +852,66 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         return null;
     }
 
+    private ValidationFailure? ValidateArchiveTimestamps(XmlDocument xml)
+    {
+        var ns = CreateNamespaceManager(xml);
+        var timestampNodes = xml.SelectNodes("//*[local-name()='UnsignedSignatureProperties']/*[local-name()='ArchiveTimeStamp']", ns)?.Cast<XmlElement>().ToArray()
+            ?? Array.Empty<XmlElement>();
+
+        foreach (var timestampNode in timestampNodes)
+        {
+            var canonicalizationMethod = (timestampNode.SelectSingleNode("*[local-name()='CanonicalizationMethod']", ns) as XmlElement)?.GetAttribute("Algorithm");
+            if (!string.Equals(canonicalizationMethod, XmlDsigExcC14NTransformUrl, StringComparison.Ordinal))
+            {
+                return new ValidationFailure(
+                    ValidationFailureKind.CanonicalizationInvalid,
+                    ValidationErrorCodes.CanonicalizationInvalid,
+                    "XAdES ArchiveTimeStamp must declare exclusive XML canonicalization.");
+            }
+
+            var encodedToken = timestampNode.SelectSingleNode("*[local-name()='EncapsulatedTimeStamp']", ns)?.InnerText;
+            if (string.IsNullOrWhiteSpace(encodedToken))
+            {
+                return new ValidationFailure(
+                    ValidationFailureKind.TimestampInvalid,
+                    ValidationErrorCodes.TimestampInvalid,
+                    "XAdES ArchiveTimeStamp is missing EncapsulatedTimeStamp.");
+            }
+
+            byte[] tokenBytes;
+            try
+            {
+                tokenBytes = Convert.FromBase64String(encodedToken);
+            }
+            catch (FormatException)
+            {
+                return new ValidationFailure(
+                    ValidationFailureKind.TimestampInvalid,
+                    ValidationErrorCodes.TimestampInvalid,
+                    "XAdES ArchiveTimeStamp contains an invalid base64 RFC 3161 token.");
+            }
+
+            if (!Rfc3161TimestampToken.TryDecode(tokenBytes, out var timestampToken, out _))
+            {
+                return new ValidationFailure(
+                    ValidationFailureKind.TimestampInvalid,
+                    ValidationErrorCodes.TimestampInvalid,
+                    "XAdES ArchiveTimeStamp token could not be decoded as an RFC 3161 token.");
+            }
+
+            var canonicalizedArchiveData = ComputeArchiveTimestampCanonicalizedValue(xml, timestampNode);
+            if (!timestampToken!.VerifySignatureForData(canonicalizedArchiveData, out _, null))
+            {
+                return new ValidationFailure(
+                    ValidationFailureKind.TimestampInvalid,
+                    ValidationErrorCodes.TimestampInvalid,
+                    "XAdES ArchiveTimeStamp token verification failed for the canonicalized XAdES-LT covered bytes.");
+            }
+        }
+
+        return null;
+    }
+
     private static void EnsureDocumentHasId(XmlElement documentElement)
     {
         if (!documentElement.HasAttribute("Id") && !documentElement.HasAttribute("ID") && !documentElement.HasAttribute("id"))
@@ -754,6 +932,7 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
         var ns = new XmlNamespaceManager(xml.NameTable);
         ns.AddNamespace("ds", XmlDsigNamespace);
         ns.AddNamespace("xades", XAdESNamespace);
+        ns.AddNamespace("xades141", XAdES141Namespace);
         return ns;
     }
 
@@ -761,6 +940,110 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
     {
         var ns = CreateNamespaceManager(xml);
         return xml.SelectSingleNode("//*[local-name()='SignatureValue']", ns) as XmlElement;
+    }
+
+    private byte[] ComputeArchiveTimestampCanonicalizedValue(XmlDocument xml, XmlElement? currentArchiveTimestamp = null)
+    {
+        var ns = CreateNamespaceManager(xml);
+        var signature = xml.SelectSingleNode("/*/*[local-name()='Signature']", ns) as XmlElement
+            ?? throw new InvalidOperationException("XAdES signature is missing ds:Signature.");
+        var signedInfo = signature.SelectSingleNode("*[local-name()='SignedInfo']", ns) as XmlElement
+            ?? throw new InvalidOperationException("XAdES signature is missing ds:SignedInfo.");
+
+        using var stream = new MemoryStream();
+        var references = signedInfo.SelectNodes("*[local-name()='Reference']", ns)?.Cast<XmlElement>()
+            ?? Array.Empty<XmlElement>();
+        foreach (var reference in references)
+        {
+            AppendReferenceOctets(stream, xml, reference);
+        }
+
+        AppendCanonicalizedNode(stream, signedInfo);
+        AppendCanonicalizedNode(stream, GetSignatureValueElement(xml));
+        AppendCanonicalizedNode(stream, signature.SelectSingleNode("*[local-name()='KeyInfo']", ns) as XmlElement);
+
+        var unsignedSignatureProperties = xml.SelectSingleNode("//*[local-name()='UnsignedSignatureProperties']", ns) as XmlElement;
+        if (unsignedSignatureProperties is not null)
+        {
+            foreach (var property in unsignedSignatureProperties.ChildNodes.OfType<XmlElement>())
+            {
+                if (currentArchiveTimestamp is not null && ReferenceEquals(property, currentArchiveTimestamp))
+                {
+                    break;
+                }
+
+                AppendCanonicalizedNode(stream, property);
+            }
+        }
+
+        var objects = signature.SelectNodes("*[local-name()='Object']", ns)?.Cast<XmlElement>()
+            ?? Array.Empty<XmlElement>();
+        foreach (var objectElement in objects)
+        {
+            if (objectElement.SelectSingleNode("*[local-name()='QualifyingProperties']", ns) is not null)
+            {
+                continue;
+            }
+
+            AppendCanonicalizedNode(stream, objectElement);
+        }
+
+        return stream.ToArray();
+    }
+
+    private void AppendReferenceOctets(Stream stream, XmlDocument xml, XmlElement reference)
+    {
+        byte[] octets;
+        var type = reference.GetAttribute("Type");
+        if (string.IsNullOrEmpty(type))
+        {
+            octets = ComputeDocumentReferenceCanonicalizedValue(xml);
+        }
+        else if (string.Equals(type, SignedPropertiesTypeUri, StringComparison.Ordinal))
+        {
+            var uri = reference.GetAttribute("URI");
+            var signedPropertiesId = uri.StartsWith('#') ? uri[1..] : uri;
+            var signedProperties = FindElementById(xml, signedPropertiesId)
+                ?? throw new InvalidOperationException("XAdES SignedProperties reference could not be resolved for archive timestamp computation.");
+            octets = canonicalizer.Canonicalize(signedProperties);
+        }
+        else
+        {
+            throw new NotSupportedException($"Unsupported XAdES reference type '{type}' for archive timestamp computation.");
+        }
+
+        stream.Write(octets, 0, octets.Length);
+    }
+
+    private void AppendCanonicalizedNode(Stream stream, XmlElement? element)
+    {
+        if (element is null)
+        {
+            return;
+        }
+
+        var octets = canonicalizer.Canonicalize(element);
+        stream.Write(octets, 0, octets.Length);
+    }
+
+    private static XmlElement? FindElementById(XmlDocument xml, string? id)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return null;
+        }
+
+        var ns = CreateNamespaceManager(xml);
+        return xml.SelectSingleNode($"//*[@Id='{id}' or @ID='{id}' or @id='{id}']", ns) as XmlElement;
+    }
+
+    private void EnsureCanAttachArchiveTimestamp(XmlDocument xml)
+    {
+        var descriptor = ReadSignature(System.Text.Encoding.UTF8.GetBytes(xml.OuterXml));
+        if (descriptor.Level < SignatureLevel.BaselineLT)
+        {
+            throw new InvalidOperationException("XAdES Baseline-LTA embedding requires an existing Baseline-LT signature.");
+        }
     }
 
     private static XmlElement GetOrCreateUnsignedSignatureProperties(XmlDocument xml)
@@ -965,8 +1248,14 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
 
     private static SignatureLevel DetermineLevel(
         IReadOnlyList<TimestampMaterial> timestamps,
-        EmbeddedValidationData validationData)
+        EmbeddedValidationData validationData,
+        IReadOnlyList<TimestampMaterial> archiveTimestamps)
     {
+        if (archiveTimestamps.Count > 0 && timestamps.Count > 0 && validationData.CertificateValues.Count > 0 && validationData.RevocationValues.Count > 0)
+        {
+            return SignatureLevel.BaselineLTA;
+        }
+
         if (timestamps.Count > 0 && validationData.CertificateValues.Count > 0 && validationData.RevocationValues.Count > 0)
         {
             return SignatureLevel.BaselineLT;
@@ -1050,6 +1339,7 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
 
     private const string XmlDsigNamespace = "http://www.w3.org/2000/09/xmldsig#";
     private const string XAdESNamespace = "http://uri.etsi.org/01903/v1.3.2#";
+    private const string XAdES141Namespace = "http://uri.etsi.org/01903/v1.4.1#";
     private const string SignedPropertiesTypeUri = "http://uri.etsi.org/01903#SignedProperties";
     private const string XmlDsigExcC14NTransformUrl = "http://www.w3.org/2001/10/xml-exc-c14n#";
     private const string XmlDsigEnvelopedSignatureTransformUrl = "http://www.w3.org/2000/09/xmldsig#enveloped-signature";
