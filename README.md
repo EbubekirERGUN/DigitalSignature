@@ -1,75 +1,86 @@
 # DigitalSignature
 
-![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet)
-![ETSI Checker](https://img.shields.io/badge/ETSI%20Checker-20%2F20%20PASS-2ea44f)
-![Profiles](https://img.shields.io/badge/Profiles-B%20%7C%20T%20%7C%20LT-1f6feb)
-![Formats](https://img.shields.io/badge/Formats-CAdES%20%7C%20XAdES%20%7C%20PAdES%20%7C%20JAdES%20%7C%20ASiC--S-6f42c1)
+<p align="center">
+  <strong>.NET 10 toolkit for ETSI-style digital signatures</strong><br/>
+  CAdES, XAdES, PAdES, JAdES, and ASiC-S in one consistent codebase.
+</p>
 
-DigitalSignature is a .NET 10 digital signature toolkit for CAdES, XAdES, PAdES, JAdES, and ASiC-S.
+<p align="center">
+  Build real artifacts, validate them locally, and check interoperability against the ETSI Conformance Checker.
+</p>
 
-It focuses on practical ETSI-style signing and validation flows, with local verification and runtime-generated artifacts checked against the ETSI Conformance Checker.
+<p align="center">
+  <img alt=".NET 10" src="https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet" />
+  <img alt="ETSI Checker" src="https://img.shields.io/badge/ETSI%20Checker-20%2F20%20PASS-2ea44f" />
+  <img alt="Profiles" src="https://img.shields.io/badge/Profiles-B%20%7C%20T%20%7C%20LT%20%7C%20LTA-1f6feb" />
+  <img alt="Formats" src="https://img.shields.io/badge/Formats-CAdES%20%7C%20XAdES%20%7C%20PAdES%20%7C%20JAdES%20%7C%20ASiC--S-6f42c1" />
+</p>
 
-## Why this project?
+---
 
-DigitalSignature is built for teams that want one consistent .NET codebase for multiple ETSI-oriented signature formats instead of separate, format-specific implementations.
+DigitalSignature is a modular .NET 10 library for teams that want one practical implementation surface across the main ETSI signature families instead of separate format-specific stacks.
 
-It is designed around a few practical goals:
+It is built around a simple idea: generate actual signature artifacts, not just model objects, then verify them both locally and with external conformance tooling.
 
-- keep the programming model consistent across signature families
-- generate real runtime artifacts, not only unit-test-only structures
-- validate outputs locally and against the ETSI Conformance Checker
-- share signing, timestamp, augmentation, and validation foundations across formats
-- keep the codebase modular enough for package-oriented consumption
+## Why this project stands out
 
-## Highlights
+<table>
+  <tr>
+    <td valign="top" width="25%">
+      <strong>One programming model</strong><br/>
+      Shared abstractions for signing, timestamping, augmentation, and validation across families.
+    </td>
+    <td valign="top" width="25%">
+      <strong>Real runtime artifacts</strong><br/>
+      The repo generates actual <code>.p7m</code>, <code>.xml</code>, <code>.pdf</code>, <code>.json</code>, and <code>.asics</code> outputs.
+    </td>
+    <td valign="top" width="25%">
+      <strong>Checker-backed interoperability</strong><br/>
+      The current runtime demo set passes ETSI checker validation across B, T, LT, and LTA.
+    </td>
+    <td valign="top" width="25%">
+      <strong>Modular layout</strong><br/>
+      The solution is already split into package-sized modules for future NuGet-friendly consumption.
+    </td>
+  </tr>
+</table>
 
-- Baseline-B, Baseline-T, and Baseline-LT support across the main signature families
-- Local signing and validation with `RSA` and `X509Certificate2`
-- ETSI checker verified interoperability for the current runtime artifact set
-- JAdES support built around JSON General Serialization
-- Shared validation and augmentation foundations for cross-format workflows
+## At a glance
+
+| Area | Status |
+|---|---|
+| Signature families | **CAdES, XAdES, PAdES, JAdES, ASiC-S** |
+| Supported levels | **Baseline-B, Baseline-T, Baseline-LT, Baseline-LTA** |
+| Runtime demo outputs | **24 signature artifacts + demo certificates** |
+| ETSI conformance sweep | **20 / 20 PASS** |
+| Validation style | **Local verification + ETSI checker verification** |
+| JAdES persistence model | **JSON General Serialization first** |
+
+## Format coverage
+
+| Family | Typical artifact | What the repo produces |
+|---|---|---|
+| **CAdES** | `.p7s`, `.p7m` | Detached and attached CMS/CAdES signatures, timestamps, LT material, LTA archive timestamps |
+| **XAdES** | `.xml` | XML signatures with timestamp, validation material, and archive timestamp support |
+| **PAdES** | `.pdf` | PDF signatures with DSS/VRI support and LTA via `DocTimeStamp` |
+| **JAdES** | `.json`, `.jws` | Compact helper output for B, JSON General Serialization for T/LT/LTA |
+| **ASiC-S** | `.asics` | Single-file containers carrying embedded CAdES signatures through LTA |
 
 ## Validation status
 
-The current runtime artifact set passes both local verification and a fresh ETSI Conformance Checker sweep across all Baseline-B, Baseline-T, Baseline-LT, and Baseline-LTA rows below.
+The current runtime artifact set passes both local verification and a fresh ETSI Conformance Checker sweep across all rows below.
 
-| Format | Baseline-B | Baseline-T | Baseline-LT | Baseline-LTA | Local Validation | ETSI Checker | Notes |
+| Format | B | T | LT | LTA | Local Validation | ETSI Checker | Implementation detail |
 |---|---:|---:|---:|---:|---|---|---|
-| CAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT/LTA) | LTA uses `archiveTimestampV3` with embedded `ATSHashIndexV3` |
-| XAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT/LTA) | LTA uses `xades141:ArchiveTimeStamp` |
-| PAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT/LTA) | LTA uses PDF-level `DocTimeStamp` with `ETSI.RFC3161` |
-| ASiC-S | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT/LTA) | LTA carries embedded CAdES-LTA inside the container |
-| JAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT/LTA) | Primary artifact is JSON General Serialization; LTA uses `arcTst` |
+| CAdES | ✅ | ✅ | ✅ | ✅ | Pass | Pass | `archiveTimestampV3` with embedded `ATSHashIndexV3` |
+| XAdES | ✅ | ✅ | ✅ | ✅ | Pass | Pass | `xades141:ArchiveTimeStamp` |
+| PAdES | ✅ | ✅ | ✅ | ✅ | Pass | Pass | PDF `DocTimeStamp` with `ETSI.RFC3161` |
+| ASiC-S | ✅ | ✅ | ✅ | ✅ | Pass | Pass | Embedded CAdES carried inside the container |
+| JAdES | ✅ | ✅ | ✅ | ✅ | Pass | Pass | JSON General Serialization with `arcTst` for LTA |
 
-## Architecture overview
+## Try it locally
 
-```mermaid
-flowchart LR
-    A[Application] --> B[DigitalSignature.Abstractions]
-    B --> C[DigitalSignature.Core]
-
-    C --> C1[DigitalSignature.CAdES]
-    C --> C2[DigitalSignature.XAdES]
-    C --> C3[DigitalSignature.PAdES]
-    C --> C4[DigitalSignature.JAdES]
-    C --> C5[DigitalSignature.ASiC]
-
-    C1 --> V[DigitalSignature.Validation]
-    C2 --> V
-    C3 --> V
-    C4 --> V
-    C5 --> V
-
-    V --> R[Validation results and reports]
-    C1 --> O[Runtime artifacts]
-    C2 --> O
-    C3 --> O
-    C4 --> O
-    C5 --> O
-    O --> E[ETSI Conformance Checker]
-```
-
-## Build and test
+### Build and test
 
 ```bash
 dotnet restore DigitalSignature.slnx
@@ -77,7 +88,31 @@ dotnet build DigitalSignature.slnx
 dotnet test DigitalSignature.slnx
 ```
 
-## Quick example
+### Generate the runtime demo set
+
+```bash
+dotnet run --project samples/DigitalSignature.ArtifactDemo/DigitalSignature.ArtifactDemo.csproj -- artifacts/runtime-demo
+```
+
+That demo currently produces:
+
+- ASiC-S: B, T, LT, LTA
+- CAdES: detached B, attached B/T/LT/LTA
+- XAdES: B, T, LT, LTA
+- JAdES: compact B, JSON B/T/LT/LTA
+- PAdES: B, T, LT, LTA
+
+Representative output files include:
+
+```text
+sample-asic-lta.asics
+sample-cades-lta.p7m
+sample-xades-lta.xml
+sample-jades-lta.json
+sample-pades-lta.pdf
+```
+
+## Minimal example
 
 ```csharp
 using System.Security.Cryptography;
@@ -118,57 +153,88 @@ var validation = service.VerifyDetachedSignature(payload, signature.Data);
 Console.WriteLine(validation.Conclusion);
 ```
 
-## NuGet-friendly module layout
+## Architecture overview
 
-The solution is already split into package-sized modules, so consumers can take only the parts they need.
+```mermaid
+flowchart LR
+    A[Application] --> B[DigitalSignature.Abstractions]
+    B --> C[DigitalSignature.Core]
 
-- `DigitalSignature.Abstractions`
-- `DigitalSignature.Core`
-- `DigitalSignature.CAdES`
-- `DigitalSignature.XAdES`
-- `DigitalSignature.PAdES`
-- `DigitalSignature.JAdES`
-- `DigitalSignature.ASiC`
-- `DigitalSignature.Validation`
+    C --> C1[CAdES]
+    C --> C2[XAdES]
+    C --> C3[PAdES]
+    C --> C4[JAdES]
+    C --> C5[ASiC-S]
+
+    C1 --> V[DigitalSignature.Validation]
+    C2 --> V
+    C3 --> V
+    C4 --> V
+    C5 --> V
+
+    V --> R[Validation results and reports]
+    C1 --> O[Runtime artifacts]
+    C2 --> O
+    C3 --> O
+    C4 --> O
+    C5 --> O
+    O --> E[ETSI Conformance Checker]
+```
+
+## Module layout
+
+| Module | Responsibility |
+|---|---|
+| `DigitalSignature.Abstractions` | Shared contracts, enums, descriptors, validation material |
+| `DigitalSignature.Core` | Shared signing, timestamp, augmentation, and orchestration infrastructure |
+| `DigitalSignature.CAdES` | CMS/CAdES signing and validation helpers |
+| `DigitalSignature.XAdES` | XML/XAdES signing and validation helpers |
+| `DigitalSignature.PAdES` | PDF signing, DSS/VRI building, and verification helpers |
+| `DigitalSignature.JAdES` | JOSE/JAdES JSON signing and validation helpers |
+| `DigitalSignature.ASiC` | ASiC-S container generation and verification helpers |
+| `DigitalSignature.Validation` | Cross-format validation pipeline and reporting |
 
 A typical consumer shape looks like this:
 
 - **CAdES only**: `Abstractions + Core + CAdES`
 - **PAdES with validation**: `Abstractions + Core + CAdES + PAdES + Validation`
-- **JAdES only**: `Abstractions + Core + JAdES + Validation`
+- **JAdES focused**: `Abstractions + Core + JAdES + Validation`
 - **Full toolkit**: all format modules plus `Validation`
-
-Today, the repository is consumed directly from source/projects. The current module boundaries are intentionally aligned for clean future package publication.
 
 ## Repository layout
 
-- `src/DigitalSignature.Abstractions` - shared contracts and signature models
-- `src/DigitalSignature.Core` - shared signing, timestamp, and augmentation infrastructure
-- `src/DigitalSignature.CAdES` - CMS/CAdES generation and validation helpers
-- `src/DigitalSignature.XAdES` - XML/XAdES generation and validation helpers
-- `src/DigitalSignature.PAdES` - PDF/PAdES generation, DSS, and verification helpers
-- `src/DigitalSignature.JAdES` - JOSE/JAdES generation and validation helpers
-- `src/DigitalSignature.ASiC` - ASiC-S container generation and validation helpers
-- `src/DigitalSignature.Validation` - validation pipeline and reporting components
-- `tests/` - unit, integration, and runtime smoke tests
+```text
+src/
+  DigitalSignature.Abstractions/
+  DigitalSignature.Core/
+  DigitalSignature.CAdES/
+  DigitalSignature.XAdES/
+  DigitalSignature.PAdES/
+  DigitalSignature.JAdES/
+  DigitalSignature.ASiC/
+  DigitalSignature.Validation/
 
-## Scope and non-goals
+tests/
+  format-specific tests
+  runtime smoke tests
+```
 
-DigitalSignature currently targets:
+## Current boundaries
+
+DigitalSignature currently focuses on:
 
 - local signing workflows based on `RSA` and `X509Certificate2`
-- Baseline-B, Baseline-T, and Baseline-LT artifact generation across all main families
-- local Baseline-LTA coverage across CAdES-LTA, ASiC-S-LTA, PAdES-LTA, XAdES-LTA, and JAdES-LTA
-- local verification and ETSI-oriented interoperability checks
+- practical ETSI-oriented artifact generation across B, T, LT, and LTA
+- runtime-generated outputs that can be verified both locally and externally
+- cross-format validation and reporting foundations
 
-It is not yet positioned as a full production PKI platform for:
+It is not yet trying to be a full production PKI platform for:
 
 - HSM or KMS backed signing
 - remote signing services
-- trust-list distribution or full production trust management
+- trust-list distribution and production trust management
+- end-to-end enterprise certificate lifecycle management
 
-## Notes
+## Project direction
 
-- For JAdES, the primary persisted artifact is JSON General Serialization.
-- Compact JWS output is kept as a helper output for Baseline-B scenarios.
-- ETSI checker results are conformance-oriented and should be interpreted separately from full trust-store policy decisions.
+The codebase is already structured for future package publication, but today it is consumed directly from source projects. The current boundaries are intentional: keep the library practical, readable, and interoperable first, then expand outward from a strong cross-format core.
