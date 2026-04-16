@@ -115,6 +115,62 @@ public class PAdESBaselineBServiceTests
         Assert.Contains($"/{expectedVriKey}", rendered);
     }
 
+    [Fact]
+    public async Task AugmentToBaselineLTA_ShouldAppendDocTimeStamp_WhenTimestampIsProvided()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=PAdES Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=PAdES Test TSA");
+
+        var service = new PAdESBaselineBService();
+        var cadesService = new CAdESBaselineBService();
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate, fixedTimestamp: DateTimeOffset.Parse("2026-04-16T10:20:00Z"));
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048, IsRecommended: true);
+        var pdf = Encoding.ASCII.GetBytes("%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF");
+        var binding = service.PrepareDetachedSignaturePlaceholder(pdf, 8192);
+        var prepared = service.PrepareDetachedSignatureInput(binding);
+        var signingTime = DateTimeOffset.Parse("2026-04-16T10:00:00Z");
+
+        var baselineBSignature = cadesService.CreateDetachedSignature(
+            new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, prepared.SignedBytes),
+            certificate,
+            rsa,
+            suite,
+            signingTime,
+            includeSigningTime: false);
+        var signatureTimestamp = await CreateTimestampForSignerInfoAsync(prepared.SignedBytes, baselineBSignature.Data, timestampProvider);
+        var baselineTSignature = cadesService.CreateDetachedSignature(
+            new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineT, prepared.SignedBytes),
+            certificate,
+            rsa,
+            suite,
+            signingTime,
+            signatureTimestamp: signatureTimestamp,
+            includeSigningTime: false);
+        var signedPdf = service.ApplyDetachedSignature(prepared, baselineTSignature.Data);
+        var baselineLtPdf = service.AugmentToBaselineLT(
+            signedPdf,
+            [
+                CreateCrlRevocationInfo(certificate, rsa, DateTimeOffset.Parse("2026-04-16T10:05:00Z")),
+                CreateCrlRevocationInfo(tsaCertificate, tsaKey, DateTimeOffset.Parse("2026-04-16T10:06:00Z"))
+            ],
+            [certificate, tsaCertificate]);
+
+        var documentTimestampInput = service.PrepareDocumentTimestampInput(baselineLtPdf, 8192);
+        var documentTimestampResponse = await timestampProvider.GetTimestampAsync(
+            service.CreateDocumentTimestampRequest(documentTimestampInput, suite.HashAlgorithm));
+        Assert.True(documentTimestampResponse.IsSuccess);
+        Assert.NotNull(documentTimestampResponse.Timestamp);
+
+        var baselineLtaPdf = service.ApplyDocumentTimestamp(documentTimestampInput, documentTimestampResponse.Timestamp!);
+        var rendered = Encoding.Latin1.GetString(baselineLtaPdf.Span);
+
+        Assert.Contains("/Type /DocTimeStamp", rendered);
+        Assert.Contains("/SubFilter /ETSI.RFC3161", rendered);
+        Assert.DoesNotContain("**********", rendered);
+    }
+
     private static async Task<TimestampMaterial> CreateTimestampForSignerInfoAsync(
         ReadOnlyMemory<byte> payload,
         ReadOnlyMemory<byte> signature,

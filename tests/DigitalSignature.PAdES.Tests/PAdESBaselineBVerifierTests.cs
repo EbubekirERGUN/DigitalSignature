@@ -127,6 +127,59 @@ public class PAdESBaselineBVerifierTests
     }
 
     [Fact]
+    public async Task Verify_ShouldReadBaselineLTALevel_FromDocumentTimestamp()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=PAdES Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=PAdES Test TSA");
+
+        var padesService = new PAdESBaselineBService();
+        var verifier = new PAdESBaselineBVerifier();
+        var cadesService = new CAdESBaselineBService();
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate, fixedTimestamp: DateTimeOffset.Parse("2026-04-16T10:45:00Z"));
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048, IsRecommended: true);
+        var pdf = Encoding.ASCII.GetBytes("%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF");
+
+        var binding = padesService.PrepareDetachedSignaturePlaceholder(pdf, 8192);
+        var prepared = padesService.PrepareDetachedSignatureInput(binding);
+        var signingTime = DateTimeOffset.Parse("2026-04-16T10:15:00Z");
+        var baselineBSignature = cadesService.CreateDetachedSignature(new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, prepared.SignedBytes), certificate, rsa, suite, signingTime, includeSigningTime: false);
+        var signatureTimestamp = await CreateTimestampForSignerInfoAsync(prepared.SignedBytes, baselineBSignature.Data, timestampProvider);
+        var baselineTSignature = cadesService.CreateDetachedSignature(
+            new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineT, prepared.SignedBytes),
+            certificate,
+            rsa,
+            suite,
+            signingTime,
+            signatureTimestamp: signatureTimestamp,
+            includeSigningTime: false);
+        var baselineTPdf = padesService.ApplyDetachedSignature(prepared, baselineTSignature.Data);
+        var baselineLtPdf = padesService.AugmentToBaselineLT(
+            baselineTPdf,
+            [
+                CreateCrlRevocationInfo(certificate, rsa, DateTimeOffset.Parse("2026-04-16T10:20:00Z")),
+                CreateCrlRevocationInfo(tsaCertificate, tsaKey, DateTimeOffset.Parse("2026-04-16T10:21:00Z"))
+            ],
+            [certificate, tsaCertificate]);
+
+        var documentTimestampInput = padesService.PrepareDocumentTimestampInput(baselineLtPdf, 8192);
+        var documentTimestampResponse = await timestampProvider.GetTimestampAsync(
+            padesService.CreateDocumentTimestampRequest(documentTimestampInput, suite.HashAlgorithm));
+        Assert.True(documentTimestampResponse.IsSuccess);
+        Assert.NotNull(documentTimestampResponse.Timestamp);
+
+        var baselineLtaPdf = padesService.ApplyDocumentTimestamp(documentTimestampInput, documentTimestampResponse.Timestamp!);
+        var result = verifier.Verify(baselineLtaPdf);
+
+        Assert.Equal(ValidationConclusion.Valid, result.Validation.Conclusion);
+        Assert.True(result.HasDetachedCAdESSignature);
+        Assert.NotNull(result.Validation.Signature);
+        Assert.Equal(SignatureLevel.BaselineLTA, result.Validation.Signature!.Level);
+        Assert.Single(result.Validation.Signature.ValidationMaterial.ArchiveTimestamps);
+    }
+
+    [Fact]
     public void Verify_ShouldFail_WhenPdfDoesNotContainSignaturePlaceholder()
     {
         var verifier = new PAdESBaselineBVerifier();

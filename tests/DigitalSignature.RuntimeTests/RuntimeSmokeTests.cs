@@ -466,6 +466,56 @@ public class RuntimeSmokeTests
         Assert.NotEmpty(verification.Validation.Signature.ValidationMaterial.RevocationValues);
     }
 
+    [Fact]
+    public async Task PAdES_RuntimeSmoke_ShouldPrepareBindAndVerifyBaselineLTASignatureContainer()
+    {
+        using var material = new RuntimeMaterial();
+        var service = new PAdESBaselineBService();
+        var verifier = new PAdESBaselineBVerifier();
+        var cadesService = new CAdESBaselineBService();
+        var binding = service.PrepareDetachedSignaturePlaceholder(RuntimeSmokeFixtures.PadesPayload, 8192);
+        var prepared = service.PrepareDetachedSignatureInput(binding);
+        var signingTime = DateTimeOffset.Parse("2026-04-14T08:11:30Z");
+        var baselineBSignature = cadesService.CreateDetachedSignature(
+            new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, prepared.SignedBytes),
+            material.Certificate,
+            material.Key,
+            material.Suite,
+            signingTime,
+            includeSigningTime: false);
+        var baselineTSignature = cadesService.CreateDetachedSignature(
+            new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineT, prepared.SignedBytes),
+            material.Certificate,
+            material.Key,
+            material.Suite,
+            signingTime,
+            signatureTimestamp: await CreateTimestampForDetachedCmsAsync(prepared.SignedBytes, baselineBSignature.Data, material.TimestampProvider),
+            includeSigningTime: false);
+        var baselineTPdf = service.ApplyDetachedSignature(prepared, baselineTSignature.Data);
+        var baselineLtPdf = service.AugmentToBaselineLT(
+            baselineTPdf,
+            [
+                CreateCrlRevocationInfo(material.Certificate, material.Key, DateTimeOffset.Parse("2026-04-14T08:12:30Z")),
+                CreateCrlRevocationInfo(material.TsaCertificate, material.TsaKey, DateTimeOffset.Parse("2026-04-14T08:13:30Z"))
+            ],
+            [material.Certificate, material.TsaCertificate]);
+        var documentTimestampInput = service.PrepareDocumentTimestampInput(baselineLtPdf, 8192);
+        var documentTimestampResponse = await material.TimestampProvider.GetTimestampAsync(
+            service.CreateDocumentTimestampRequest(documentTimestampInput, material.Suite.HashAlgorithm));
+
+        Assert.True(documentTimestampResponse.IsSuccess);
+        Assert.NotNull(documentTimestampResponse.Timestamp);
+
+        var baselineLtaPdf = service.ApplyDocumentTimestamp(documentTimestampInput, documentTimestampResponse.Timestamp!);
+        var verification = verifier.Verify(baselineLtaPdf);
+
+        Assert.Equal(ValidationConclusion.Valid, verification.Validation.Conclusion);
+        Assert.True(verification.HasDetachedCAdESSignature);
+        Assert.NotNull(verification.Validation.Signature);
+        Assert.Equal(SignatureLevel.BaselineLTA, verification.Validation.Signature!.Level);
+        Assert.Single(verification.Validation.Signature.ValidationMaterial.ArchiveTimestamps);
+    }
+
     private static async Task<TimestampMaterial> CreateTimestampForAttachedSignatureAsync(
         ReadOnlyMemory<byte> signature,
         ITimestampProvider timestampProvider)
