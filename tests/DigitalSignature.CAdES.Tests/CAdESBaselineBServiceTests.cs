@@ -133,6 +133,88 @@ public class CAdESBaselineBServiceTests
     }
 
     [Fact]
+    public async Task AttachArchiveTimestamp_ShouldProduceCAdESBaselineLTAArtifact_ForAttachedSignature()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=CAdES Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=CAdES Test TSA");
+
+        var service = new CAdESBaselineBService();
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate, fixedTimestamp: DateTimeOffset.Parse("2026-04-16T08:40:00Z"));
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048);
+        var request = new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, "Hello CAdES-LTA"u8.ToArray());
+
+        var signingTime = DateTimeOffset.Parse("2026-04-16T08:30:00Z");
+        var baselineBArtifact = service.CreateAttachedSignature(request, certificate, rsa, suite, signingTime);
+        var signatureTimestamp = await CreateTimestampForAttachedSignatureAsync(baselineBArtifact.Data, timestampProvider);
+        var baselineLTArtifact = service.CreateAttachedSignature(
+            request with { Level = SignatureLevel.BaselineLT },
+            certificate,
+            rsa,
+            suite,
+            signingTime,
+            signatureTimestamp,
+            [certificate, tsaCertificate],
+            [
+                CreateCrlRevocationInfo(certificate, rsa, DateTimeOffset.Parse("2026-04-16T08:35:00Z")),
+                CreateCrlRevocationInfo(tsaCertificate, tsaKey, DateTimeOffset.Parse("2026-04-16T08:36:00Z"))
+            ]);
+
+        var archiveTimestamp = await CreateArchiveTimestampAsync(service, baselineLTArtifact, suite.HashAlgorithm, timestampProvider);
+        var baselineLtaArtifact = service.AttachArchiveTimestamp(baselineLTArtifact, archiveTimestamp);
+
+        var descriptor = service.ReadSignature(baselineLtaArtifact.Data);
+        var validation = service.VerifyAttachedSignature(baselineLtaArtifact.Data);
+
+        Assert.Equal(SignatureLevel.BaselineLTA, baselineLtaArtifact.Level);
+        Assert.Equal(SignatureLevel.BaselineLTA, descriptor.Level);
+        Assert.Single(descriptor.ValidationMaterial.ArchiveTimestamps);
+        Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
+    }
+
+    [Fact]
+    public async Task AttachArchiveTimestamp_ShouldProduceCAdESBaselineLTAArtifact_ForDetachedSignature()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=CAdES Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=CAdES Test TSA");
+
+        var service = new CAdESBaselineBService();
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate, fixedTimestamp: DateTimeOffset.Parse("2026-04-16T09:40:00Z"));
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048);
+        var request = new SignatureRequest(SignatureFormat.CAdES, SignatureLevel.BaselineB, "Hello detached CAdES-LTA"u8.ToArray());
+
+        var signingTime = DateTimeOffset.Parse("2026-04-16T09:30:00Z");
+        var baselineBArtifact = service.CreateDetachedSignature(request, certificate, rsa, suite, signingTime);
+        var signatureTimestamp = await CreateTimestampForSignatureAsync(baselineBArtifact.Data, request.Payload, timestampProvider);
+        var baselineLTArtifact = service.CreateDetachedSignature(
+            request with { Level = SignatureLevel.BaselineLT },
+            certificate,
+            rsa,
+            suite,
+            signingTime,
+            signatureTimestamp,
+            [certificate, tsaCertificate],
+            [
+                CreateCrlRevocationInfo(certificate, rsa, DateTimeOffset.Parse("2026-04-16T09:35:00Z")),
+                CreateCrlRevocationInfo(tsaCertificate, tsaKey, DateTimeOffset.Parse("2026-04-16T09:36:00Z"))
+            ]);
+
+        var archiveTimestamp = await CreateArchiveTimestampAsync(service, baselineLTArtifact, suite.HashAlgorithm, timestampProvider, request.Payload);
+        var baselineLtaArtifact = service.AttachArchiveTimestamp(baselineLTArtifact, archiveTimestamp);
+
+        var descriptor = service.ReadSignature(baselineLtaArtifact.Data);
+        var validation = service.VerifyDetachedSignature(request.Payload, baselineLtaArtifact.Data);
+
+        Assert.Equal(SignatureLevel.BaselineLTA, baselineLtaArtifact.Level);
+        Assert.Equal(SignatureLevel.BaselineLTA, descriptor.Level);
+        Assert.Single(descriptor.ValidationMaterial.ArchiveTimestamps);
+        Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
+    }
+
+    [Fact]
     public async Task VerifyDetachedSignature_ShouldFail_WhenTimestampTokenIsModified()
     {
         using var rsa = RSA.Create(2048);
@@ -249,6 +331,21 @@ public class CAdESBaselineBServiceTests
                 timestampRequest.RequestedPolicyId?.Value,
                 timestampRequest.GetNonce() is { } nonce ? Convert.ToHexString(nonce.Span) : null,
                 timestampRequest.RequestSignerCertificate));
+
+        Assert.True(response.IsSuccess);
+        Assert.NotNull(response.Timestamp);
+        return response.Timestamp!;
+    }
+
+    private static async Task<TimestampMaterial> CreateArchiveTimestampAsync(
+        CAdESBaselineBService service,
+        SignatureArtifact artifact,
+        HashAlgorithmIdentifier hashAlgorithm,
+        ITimestampProvider timestampProvider,
+        ReadOnlyMemory<byte> detachedPayload = default)
+    {
+        var response = await timestampProvider.GetTimestampAsync(
+            service.CreateArchiveTimestampRequest(artifact.Data, hashAlgorithm, detachedPayload));
 
         Assert.True(response.IsSuccess);
         Assert.NotNull(response.Timestamp);
