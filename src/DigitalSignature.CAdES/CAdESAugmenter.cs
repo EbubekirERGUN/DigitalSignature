@@ -19,8 +19,8 @@ public sealed class CAdESAugmenter : ISignatureAugmenter
 
         var signature = request.Signature;
         var timestamps = signature.ValidationMaterial.Timestamps.ToList();
+        var archiveTimestamps = signature.ValidationMaterial.ArchiveTimestamps.ToList();
         var revocationInfo = signature.ValidationMaterial.RevocationInfo.ToList();
-        var evidenceRecords = signature.ValidationMaterial.EvidenceRecords.ToList();
         var attachments = new List<TimestampAttachment>();
 
         if (request.TargetLevel >= SignatureLevel.BaselineT)
@@ -60,9 +60,15 @@ public sealed class CAdESAugmenter : ISignatureAugmenter
 
         if (request.TargetLevel >= SignatureLevel.BaselineLTA)
         {
-            evidenceRecords = request.EffectiveEvidenceRecords.Count > 0
-                ? request.EffectiveEvidenceRecords.ToList()
-                : evidenceRecords;
+            var archiveTimestamp = request.EffectiveArchiveTimestamps.FirstOrDefault()
+                ?? throw new InvalidOperationException("Baseline-LTA augmentation requires at least one archive timestamp token.");
+
+            if (!archiveTimestamps.Contains(archiveTimestamp))
+            {
+                archiveTimestamps.Add(archiveTimestamp);
+            }
+
+            attachments.Add(new TimestampAttachment(SignatureLevel.BaselineLTA, archiveTimestamp, "RFC 3161 archive timestamp token"));
 
             signature = signature with
             {
@@ -71,7 +77,7 @@ public sealed class CAdESAugmenter : ISignatureAugmenter
                 {
                     RevocationInfo = revocationInfo,
                     Timestamps = timestamps,
-                    EvidenceRecords = evidenceRecords
+                    ArchiveTimestamps = archiveTimestamps
                 }
             };
         }
@@ -82,7 +88,7 @@ public sealed class CAdESAugmenter : ISignatureAugmenter
                 ? TimestampAttachmentPlan.Empty(SignatureFormat.CAdES, request.Signature.Level, request.TargetLevel)
                 : new TimestampAttachmentPlan(SignatureFormat.CAdES, request.Signature.Level, request.TargetLevel, attachments),
             HasEmbeddedValidationData: signature.ValidationMaterial.RevocationInfo.Count > 0,
-            HasArchiveEvidence: signature.ValidationMaterial.EvidenceRecords.Count > 0);
+            HasArchiveEvidence: signature.ValidationMaterial.ArchiveTimestamps.Count > 0);
 
         return ValueTask.FromResult(result);
     }

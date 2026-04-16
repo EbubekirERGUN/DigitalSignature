@@ -38,6 +38,7 @@ public class ValidationResultTests
         Assert.Empty(empty.CertificateChain);
         Assert.Empty(empty.RevocationInfo);
         Assert.Empty(empty.Timestamps);
+        Assert.Empty(empty.ArchiveTimestamps);
         Assert.Empty(empty.EvidenceRecords);
     }
 }

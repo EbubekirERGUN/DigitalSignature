@@ -8,9 +8,11 @@ public sealed record AugmentationRequest(
     TemporalValidationContext TemporalContext,
     IReadOnlyList<RevocationInfo>? RevocationInfo = null,
     IReadOnlyList<TimestampMaterial>? Timestamps = null,
+    IReadOnlyList<TimestampMaterial>? ArchiveTimestamps = null,
     IReadOnlyList<ReadOnlyMemory<byte>>? EvidenceRecords = null)
 {
     public IReadOnlyList<RevocationInfo> EffectiveRevocationInfo => RevocationInfo ?? Array.Empty<RevocationInfo>();
     public IReadOnlyList<TimestampMaterial> EffectiveTimestamps => Timestamps ?? Array.Empty<TimestampMaterial>();
+    public IReadOnlyList<TimestampMaterial> EffectiveArchiveTimestamps => ArchiveTimestamps ?? Array.Empty<TimestampMaterial>();
     public IReadOnlyList<ReadOnlyMemory<byte>> EffectiveEvidenceRecords => EvidenceRecords ?? Array.Empty<ReadOnlyMemory<byte>>();
 }

@@ -7,6 +7,7 @@ public sealed record ValidationMaterial(
     IReadOnlyList<TimestampMaterial> Timestamps,
     IReadOnlyList<ReadOnlyMemory<byte>> EvidenceRecords)
 {
+    public IReadOnlyList<TimestampMaterial> ArchiveTimestamps { get; init; } = Array.Empty<TimestampMaterial>();
     public IReadOnlyList<ReadOnlyMemory<byte>> CertificateValues { get; init; } = Array.Empty<ReadOnlyMemory<byte>>();
     public IReadOnlyList<ReadOnlyMemory<byte>> RevocationValues { get; init; } = Array.Empty<ReadOnlyMemory<byte>>();
 
@@ -17,6 +18,7 @@ public sealed record ValidationMaterial(
         Timestamps: Array.Empty<TimestampMaterial>(),
         EvidenceRecords: Array.Empty<ReadOnlyMemory<byte>>())
     {
+        ArchiveTimestamps = Array.Empty<TimestampMaterial>(),
         CertificateValues = Array.Empty<ReadOnlyMemory<byte>>(),
         RevocationValues = Array.Empty<ReadOnlyMemory<byte>>()
     };

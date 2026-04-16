@@ -51,9 +51,10 @@ public class SignatureAugmentationEngineTests
     }
 
     [Fact]
-    public async Task AugmentAsync_ShouldRaiseCAdESBaselineLT_ToBaselineLTA_AndEmbedArchiveEvidence()
+    public async Task AugmentAsync_ShouldRaiseCAdESBaselineLT_ToBaselineLTA_AndAttachArchiveTimestamp()
     {
         var engine = new SignatureAugmentationEngine([new CAdESAugmenter()]);
+        var archiveTimestamp = new TimestampMaterial("archive-timestamp-token"u8.ToArray(), DateTimeOffset.UtcNow, HashAlgorithm: "SHA-256");
         var signature = CreateSignature(SignatureLevel.BaselineLT) with
         {
             ValidationMaterial = ValidationMaterial.Empty with
@@ -68,12 +69,12 @@ public class SignatureAugmentationEngineTests
             SignatureLevel.BaselineLTA,
             TemporalValidationContext.ForSigningTime(DateTimeOffset.UtcNow, signature.SigningTime),
             Timestamps: signature.ValidationMaterial.Timestamps,
-            EvidenceRecords: ["archive-evidence"u8.ToArray()]);
+            ArchiveTimestamps: [archiveTimestamp]);
 
         var result = await engine.AugmentAsync(request);
 
         Assert.Equal(SignatureLevel.BaselineLTA, result.Signature.Level);
-        Assert.Single(result.Signature.ValidationMaterial.EvidenceRecords);
+        Assert.Single(result.Signature.ValidationMaterial.ArchiveTimestamps);
         Assert.True(result.HasArchiveEvidence);
     }
 
