@@ -4,8 +4,12 @@ using System.Security.Cryptography.X509Certificates;
 using DigitalSignature.Abstractions;
 using DigitalSignature.CAdES;
 using DigitalSignature.Core;
+using Org.BouncyCastle.Asn1;
+using Org.BouncyCastle.Cms;
+using BcPkcsObjectIdentifiers = Org.BouncyCastle.Asn1.Pkcs.PkcsObjectIdentifiers;
 using Org.BouncyCastle.Crypto.Operators;
 using Org.BouncyCastle.Security;
+using Org.BouncyCastle.Tsp;
 using Org.BouncyCastle.X509;
 
 namespace DigitalSignature.CAdES.Tests;
@@ -118,8 +122,12 @@ public class CAdESBaselineBServiceTests
             suite,
             signingTime,
             signatureTimestamp: timestampMaterial,
-            validationCertificates: [certificate],
-            revocationInfo: [revocationInfo]);
+            validationCertificates: [certificate, tsaCertificate],
+            revocationInfo:
+            [
+                revocationInfo,
+                CreateCrlRevocationInfo(tsaCertificate, tsaKey, DateTimeOffset.Parse("2026-04-15T18:36:00Z"))
+            ]);
 
         var descriptor = service.ReadSignature(baselineLTArtifact.Data);
         var validation = service.VerifyAttachedSignature(baselineLTArtifact.Data);
@@ -128,8 +136,10 @@ public class CAdESBaselineBServiceTests
         Assert.Equal(SignatureLevel.BaselineLT, descriptor.Level);
         Assert.NotEmpty(descriptor.ValidationMaterial.CertificateValues);
         Assert.NotEmpty(descriptor.ValidationMaterial.RevocationValues);
-        Assert.Single(descriptor.ValidationMaterial.RevocationInfo);
+        Assert.Equal(2, descriptor.ValidationMaterial.RevocationInfo.Count);
         Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
+        AssertMissingUnsignedAttribute(baselineLTArtifact.Data, BcPkcsObjectIdentifiers.IdAAEtsCertValues.Id);
+        AssertMissingUnsignedAttribute(baselineLTArtifact.Data, BcPkcsObjectIdentifiers.IdAAEtsRevocationValues.Id);
     }
 
     [Fact]
@@ -170,6 +180,7 @@ public class CAdESBaselineBServiceTests
         Assert.Equal(SignatureLevel.BaselineLTA, baselineLtaArtifact.Level);
         Assert.Equal(SignatureLevel.BaselineLTA, descriptor.Level);
         Assert.Single(descriptor.ValidationMaterial.ArchiveTimestamps);
+        AssertContainsArchiveTimestampV3(baselineLtaArtifact.Data);
         Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
     }
 
@@ -211,6 +222,7 @@ public class CAdESBaselineBServiceTests
         Assert.Equal(SignatureLevel.BaselineLTA, baselineLtaArtifact.Level);
         Assert.Equal(SignatureLevel.BaselineLTA, descriptor.Level);
         Assert.Single(descriptor.ValidationMaterial.ArchiveTimestamps);
+        AssertContainsArchiveTimestampV3(baselineLtaArtifact.Data);
         Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
     }
 
@@ -313,7 +325,7 @@ public class CAdESBaselineBServiceTests
     }
 
     private static async Task<TimestampMaterial> CreateTimestampFromSignerInfoAsync(
-        SignerInfo signerInfo,
+        System.Security.Cryptography.Pkcs.SignerInfo signerInfo,
         ITimestampProvider timestampProvider)
     {
         var timestampRequest = Rfc3161TimestampRequest.CreateFromSignerInfo(
@@ -405,5 +417,31 @@ public class CAdESBaselineBServiceTests
         request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(enhancedKeyUsages, true));
 
         return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddYears(1));
+    }
+
+    private static void AssertMissingUnsignedAttribute(ReadOnlyMemory<byte> signature, string oid)
+    {
+        var signedCms = new SignedCms();
+        signedCms.Decode(signature.ToArray());
+
+        Assert.DoesNotContain(
+            signedCms.SignerInfos[0].UnsignedAttributes.Cast<CryptographicAttributeObject>(),
+            attribute => string.Equals(attribute.Oid?.Value, oid, StringComparison.Ordinal));
+    }
+
+    private static void AssertContainsArchiveTimestampV3(ReadOnlyMemory<byte> signature)
+    {
+        var cms = new CmsSignedData(signature.ToArray());
+        var signer = cms.GetSignerInfos().GetSigners().Cast<SignerInformation>().Single();
+        var archiveTimestampAttribute = signer.UnsignedAttributes?[new DerObjectIdentifier("0.4.0.1733.2.4")];
+
+        Assert.NotNull(archiveTimestampAttribute);
+        Assert.Single(archiveTimestampAttribute!.AttrValues.ToArray());
+
+        var timestampToken = new TimeStampToken(new CmsSignedData(archiveTimestampAttribute.AttrValues[0].ToAsn1Object().GetEncoded("DER")));
+        var atsHashIndexAttribute = timestampToken.UnsignedAttributes?[new DerObjectIdentifier("0.4.0.19122.1.5")];
+
+        Assert.NotNull(atsHashIndexAttribute);
+        Assert.Single(atsHashIndexAttribute!.AttrValues.ToArray());
     }
 }

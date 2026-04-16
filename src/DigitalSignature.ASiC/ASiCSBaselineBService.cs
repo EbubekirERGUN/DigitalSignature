@@ -22,7 +22,8 @@ public sealed class ASiCSBaselineBService
         HashAlgorithmIdentifier hashAlgorithm)
     {
         var inspection = GetValidInspection(containerBytes);
-        return _cadesService.CreateArchiveTimestampRequest(inspection.SignatureData!, hashAlgorithm, inspection.PayloadData!);
+        var signatureData = PrepareSignatureForArchiveTimestamp(inspection.SignatureData!, inspection.PayloadData!);
+        return _cadesService.CreateArchiveTimestampRequest(signatureData, hashAlgorithm);
     }
 
     public ASiCSBaselineBArtifact AttachArchiveTimestamp(
@@ -32,14 +33,15 @@ public sealed class ASiCSBaselineBService
         ArgumentNullException.ThrowIfNull(artifact);
 
         var inspection = GetValidInspection(artifact.Container.Data);
-        var signatureDescriptor = _cadesService.ReadSignature(inspection.SignatureData!);
+        var preparedSignature = PrepareSignatureForArchiveTimestamp(inspection.SignatureData!, inspection.PayloadData!);
+        var signatureDescriptor = _cadesService.ReadSignature(preparedSignature);
         if (signatureDescriptor.Level < SignatureLevel.BaselineLT)
         {
             throw new InvalidOperationException("ASiC-S Baseline-LTA requires a container with an embedded CAdES Baseline-LT signature.");
         }
 
         var updatedSignature = _cadesService.AttachArchiveTimestamp(
-            new SignatureArtifact(SignatureFormat.CAdES, signatureDescriptor.Level, inspection.SignatureData!, "application/pkcs7-signature"),
+            new SignatureArtifact(SignatureFormat.CAdES, signatureDescriptor.Level, preparedSignature, "application/pkcs7-signature"),
             archiveTimestamp);
 
         var containerBytes = StoredZipContainerBuilder.Build(
@@ -140,7 +142,16 @@ public sealed class ASiCSBaselineBService
                 return inspection.ToResult(ValidationResult.Failure(structuralFailure));
             }
 
-            var signatureValidation = _cadesService.VerifyDetachedSignature(inspection.PayloadData!, inspection.SignatureData!);
+            ValidationResult signatureValidation;
+            if (_cadesService.IsDetachedSignature(inspection.SignatureData!))
+            {
+                signatureValidation = _cadesService.VerifyDetachedSignature(inspection.PayloadData!, inspection.SignatureData!);
+            }
+            else
+            {
+                signatureValidation = VerifyContainerWithEncapsulatedSignature(inspection);
+            }
+
             if (signatureValidation.Conclusion == ValidationConclusion.Valid && signatureValidation.Signature is not null)
             {
                 signatureValidation = ValidationResult.Success(ToAsicDescriptor(signatureValidation.Signature));
@@ -156,6 +167,39 @@ public sealed class ASiCSBaselineBService
         {
             return Failure(ex.Message, ValidationFailureKind.MalformedSignature, ValidationErrorCodes.MalformedSignature);
         }
+    }
+
+    private byte[] PrepareSignatureForArchiveTimestamp(ReadOnlyMemory<byte> signature, ReadOnlyMemory<byte> payload)
+        => _cadesService.IsDetachedSignature(signature)
+            ? _cadesService.EncapsulateDetachedContent(signature, payload)
+            : signature.ToArray();
+
+    private ValidationResult VerifyContainerWithEncapsulatedSignature(ContainerInspection inspection)
+    {
+        var signatureValidation = _cadesService.VerifyAttachedSignature(inspection.SignatureData!);
+        if (signatureValidation.Conclusion != ValidationConclusion.Valid)
+        {
+            return signatureValidation;
+        }
+
+        var encapsulatedContent = _cadesService.ReadEncapsulatedContent(inspection.SignatureData!);
+        if (encapsulatedContent is null)
+        {
+            return ValidationResult.Failure(CreateFailure(
+                ValidationFailureKind.MalformedSignature,
+                ValidationErrorCodes.MalformedSignature,
+                "The embedded CAdES signature does not contain encapsulated content."));
+        }
+
+        if (!encapsulatedContent.AsSpan().SequenceEqual(inspection.PayloadData!))
+        {
+            return ValidationResult.Failure(CreateFailure(
+                ValidationFailureKind.HashMismatch,
+                ValidationErrorCodes.HashMismatch,
+                "The encapsulated CAdES content does not match the ASiC-S payload file."));
+        }
+
+        return signatureValidation;
     }
 
     private static string NormalizePayloadEntryName(string payloadEntryName)

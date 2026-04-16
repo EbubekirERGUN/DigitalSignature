@@ -195,8 +195,12 @@ public class RuntimeSmokeTests
             material.Suite,
             signingTime,
             signatureTimestamp: timestampMaterial,
-            validationCertificates: [material.Certificate],
-            revocationInfo: [revocationInfo]);
+            validationCertificates: [material.Certificate, material.TsaCertificate],
+            revocationInfo:
+            [
+                revocationInfo,
+                CreateCrlRevocationInfo(material.TsaCertificate, material.TsaKey, DateTimeOffset.Parse("2026-04-14T08:08:00Z"))
+            ]);
         var verification = service.VerifyAttachedSignature(baselineLTArtifact.Data);
         var descriptor = service.ReadSignature(baselineLTArtifact.Data);
 
@@ -204,7 +208,7 @@ public class RuntimeSmokeTests
         Assert.Equal(SignatureLevel.BaselineLT, descriptor.Level);
         Assert.NotEmpty(descriptor.ValidationMaterial.CertificateValues);
         Assert.NotEmpty(descriptor.ValidationMaterial.RevocationValues);
-        Assert.Single(descriptor.ValidationMaterial.RevocationInfo);
+        Assert.Equal(2, descriptor.ValidationMaterial.RevocationInfo.Count);
     }
 
     [Fact]

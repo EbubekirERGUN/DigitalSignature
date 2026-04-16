@@ -24,6 +24,8 @@ public sealed class CAdESBaselineBService
 {
     private const string SignatureTimeStampTokenOid = "1.2.840.113549.1.9.16.2.14";
     private const string ArchiveTimeStampV2Oid = "1.2.840.113549.1.9.16.2.48";
+    private const string ArchiveTimeStampV3Oid = "0.4.0.1733.2.4";
+    private const string AtsHashIndexV3Oid = "0.4.0.19122.1.5";
 
     public SignatureArtifact CreateDetachedSignature(
         SignatureRequest request,
@@ -60,8 +62,49 @@ public sealed class CAdESBaselineBService
         HashAlgorithmIdentifier hashAlgorithm,
         ReadOnlyMemory<byte> detachedPayload = default)
     {
-        var digest = ComputeArchiveTimestampDigest(signature, detachedPayload, hashAlgorithm, referenceTimestamp: null, includeUnsignedAttrsTagAndLength: true);
+        var digest = ComputeArchiveTimestampV3Digest(signature, detachedPayload, hashAlgorithm, referenceTimestamp: null);
         return new TimestampRequest(digest, GetDigestOid(hashAlgorithm));
+    }
+
+    public bool IsDetachedSignature(ReadOnlyMemory<byte> signature)
+        => ReadCmsStructure(signature).IsDetached;
+
+    public byte[]? ReadEncapsulatedContent(ReadOnlyMemory<byte> signature)
+    {
+        var contentInfo = Org.BouncyCastle.Asn1.Cms.ContentInfo.GetInstance(Asn1Object.FromByteArray(signature.ToArray()));
+        var signedData = Org.BouncyCastle.Asn1.Cms.SignedData.GetInstance(contentInfo.Content);
+        var encapsulatedContent = signedData.EncapContentInfo.Content;
+        return encapsulatedContent is null ? null : Asn1OctetString.GetInstance(encapsulatedContent).GetOctets();
+    }
+
+    public byte[] EncapsulateDetachedContent(ReadOnlyMemory<byte> signature, ReadOnlyMemory<byte> payload)
+    {
+        if (payload.IsEmpty)
+        {
+            throw new InvalidOperationException("Detached CAdES content cannot be encapsulated with an empty payload.");
+        }
+
+        var existingContent = ReadEncapsulatedContent(signature);
+        if (existingContent is not null)
+        {
+            if (!existingContent.AsSpan().SequenceEqual(payload.Span))
+            {
+                throw new InvalidOperationException("The CAdES signature already contains encapsulated content that does not match the requested payload.");
+            }
+
+            return signature.ToArray();
+        }
+
+        var contentInfo = Org.BouncyCastle.Asn1.Cms.ContentInfo.GetInstance(Asn1Object.FromByteArray(signature.ToArray()));
+        var signedData = Org.BouncyCastle.Asn1.Cms.SignedData.GetInstance(contentInfo.Content);
+        var updatedSignedData = new Org.BouncyCastle.Asn1.Cms.SignedData(
+            signedData.DigestAlgorithms,
+            new Org.BouncyCastle.Asn1.Cms.ContentInfo(signedData.EncapContentInfo.ContentType, new BerOctetString(payload.ToArray())),
+            signedData.Certificates,
+            signedData.CRLs,
+            signedData.SignerInfos);
+
+        return new Org.BouncyCastle.Asn1.Cms.ContentInfo(contentInfo.ContentType, updatedSignedData).GetEncoded();
     }
 
     public SignatureArtifact AttachArchiveTimestamp(
@@ -340,21 +383,44 @@ public sealed class CAdESBaselineBService
             throw new InvalidOperationException("Archive timestamp token cannot be empty.");
         }
 
+        TimeStampToken timeStampToken;
         try
         {
-            _ = new TimeStampToken(new CmsSignedData(timestamp.Token.ToArray()));
+            timeStampToken = new TimeStampToken(new CmsSignedData(timestamp.Token.ToArray()));
         }
         catch (Exception ex) when (ex is CmsException or TspException)
         {
             throw new InvalidOperationException("Archive timestamp token must be a decodable RFC 3161 token.", ex);
         }
 
+        var hashAlgorithm = GetDigestAlgorithmFromOid(timeStampToken.TimeStampInfo.MessageImprintAlgOid);
+        var atsHashIndexAttribute = BuildAtsHashIndexV3Attribute(signature, hashAlgorithm, referenceTimestamp: null);
+        var timestampWithHashIndex = AttachUnsignedAttributesToTimestampToken(timeStampToken, atsHashIndexAttribute);
+
         var cms = new CmsSignedData(signature.ToArray());
         var signer = cms.GetSignerInfos().GetSigners().Cast<SignerInformation>().Single();
         var unsignedAttributes = signer.UnsignedAttributes?.ToDictionary() ?? new Dictionary<DerObjectIdentifier, object>();
-        unsignedAttributes[new DerObjectIdentifier(ArchiveTimeStampV2Oid)] = new Org.BouncyCastle.Asn1.Cms.Attribute(
-            new DerObjectIdentifier(ArchiveTimeStampV2Oid),
-            new DerSet(Asn1Object.FromByteArray(timestamp.Token.ToArray())));
+        unsignedAttributes[new DerObjectIdentifier(ArchiveTimeStampV3Oid)] = new Org.BouncyCastle.Asn1.Cms.Attribute(
+            new DerObjectIdentifier(ArchiveTimeStampV3Oid),
+            new DerSet(Asn1Object.FromByteArray(timestampWithHashIndex)));
+
+        var updatedSigner = SignerInformation.ReplaceUnsignedAttributes(signer, new Org.BouncyCastle.Asn1.Cms.AttributeTable(unsignedAttributes));
+        var signerStore = new SignerInformationStore([updatedSigner]);
+        return CmsSignedData.ReplaceSigners(cms, signerStore).GetEncoded();
+    }
+
+    private static byte[] AttachUnsignedAttributesToTimestampToken(
+        TimeStampToken timestampToken,
+        params Org.BouncyCastle.Asn1.Cms.Attribute[] attributes)
+    {
+        var cms = timestampToken.ToCmsSignedData();
+        var signer = cms.GetSignerInfos().GetSigners().Cast<SignerInformation>().Single();
+        var unsignedAttributes = signer.UnsignedAttributes?.ToDictionary() ?? new Dictionary<DerObjectIdentifier, object>();
+
+        foreach (var attribute in attributes)
+        {
+            unsignedAttributes[attribute.AttrType] = attribute;
+        }
 
         var updatedSigner = SignerInformation.ReplaceUnsignedAttributes(signer, new Org.BouncyCastle.Asn1.Cms.AttributeTable(unsignedAttributes));
         var signerStore = new SignerInformationStore([updatedSigner]);
@@ -367,81 +433,108 @@ public sealed class CAdESBaselineBService
         IReadOnlyList<RevocationInfo> revocationInfo,
         HashAlgorithmIdentifier hashAlgorithm)
     {
-        var cms = new CmsSignedData(signature.ToArray());
-        var signer = cms.GetSignerInfos().GetSigners().Cast<SignerInformation>().Single();
-        var unsignedAttributes = signer.UnsignedAttributes?.ToDictionary() ?? new Dictionary<DerObjectIdentifier, object>();
+        _ = hashAlgorithm;
 
-        unsignedAttributes[PkcsObjectIdentifiers.IdAAEtsCertValues] = new Org.BouncyCastle.Asn1.Cms.Attribute(
-            PkcsObjectIdentifiers.IdAAEtsCertValues,
-            new DerSet(BuildCertificateValues(validationCertificates)));
-        unsignedAttributes[PkcsObjectIdentifiers.IdAAEtsRevocationValues] = new Org.BouncyCastle.Asn1.Cms.Attribute(
-            PkcsObjectIdentifiers.IdAAEtsRevocationValues,
-            new DerSet(BuildRevocationValues(revocationInfo)));
+        var contentInfo = Org.BouncyCastle.Asn1.Cms.ContentInfo.GetInstance(Asn1Object.FromByteArray(signature.ToArray()));
+        var signedData = Org.BouncyCastle.Asn1.Cms.SignedData.GetInstance(contentInfo.Content);
 
-        var updatedSigner = SignerInformation.ReplaceUnsignedAttributes(signer, new Org.BouncyCastle.Asn1.Cms.AttributeTable(unsignedAttributes));
-        var cmsWithSigner = CmsSignedData.ReplaceSigners(cms, new SignerInformationStore([updatedSigner]));
+        var certificateEntries = CreateDistinctAsn1EntryMap(signedData.Certificates);
+        foreach (var certificate in validationCertificates)
+        {
+            AddDistinctAsn1Entry(
+                certificateEntries,
+                X509CertificateStructure.GetInstance(Asn1Object.FromByteArray(certificate.RawData)));
+        }
 
-        var certificates = cmsWithSigner.GetCertificates().EnumerateMatches(null).ToList();
-        certificates.AddRange(validationCertificates.Select(DotNetUtilities.FromX509Certificate));
-        certificates = certificates
-            .GroupBy(certificate => Convert.ToBase64String(certificate.GetEncoded()))
-            .Select(group => group.First())
-            .ToList();
-
-        var crls = cmsWithSigner.GetCrls().EnumerateMatches(null).ToList();
-        crls.AddRange(
-            revocationInfo
-                .Where(info => !info.EncodedValue.IsEmpty && IsCrlSource(info.Source))
-                .Select(info => new X509CrlParser().ReadCrl(info.EncodedValue.ToArray()))
-                .Where(crl => crl is not null)!);
-        crls = crls
-            .GroupBy(crl => Convert.ToBase64String(crl.GetEncoded()))
-            .Select(group => group.First())
-            .ToList();
-
-        return CmsSignedData.ReplaceCertificatesAndCrls(
-            cmsWithSigner,
-            CollectionUtilities.CreateStore(certificates),
-            CollectionUtilities.CreateStore(crls))
-            .GetEncoded();
-    }
-
-    private static CertificateValues BuildCertificateValues(IEnumerable<X509Certificate2> certificates)
-    {
-        var values = certificates
-            .Select(certificate => X509CertificateStructure.GetInstance(Asn1Object.FromByteArray(certificate.RawData)))
-            .ToArray();
-
-        return new CertificateValues(values);
-    }
-
-    private static RevocationValues BuildRevocationValues(IEnumerable<RevocationInfo> revocationInfo)
-    {
-        var crls = new List<CertificateList>();
-        var ocspResponses = new List<BasicOcspResponse>();
-
+        var revocationEntries = CreateDistinctAsn1EntryMap(signedData.CRLs);
         foreach (var info in revocationInfo.Where(info => !info.EncodedValue.IsEmpty))
         {
             var rawValue = info.EncodedValue.ToArray();
             if (IsCrlSource(info.Source))
             {
-                crls.Add(CertificateList.GetInstance(Asn1Object.FromByteArray(rawValue)));
+                AddDistinctAsn1Entry(revocationEntries, CertificateList.GetInstance(Asn1Object.FromByteArray(rawValue)));
                 continue;
             }
 
             if (IsOcspSource(info.Source))
             {
-                ocspResponses.Add(BasicOcspResponse.GetInstance(Asn1Object.FromByteArray(rawValue)));
+                AddDistinctAsn1Entry(
+                    revocationEntries,
+                    new DerTaggedObject(
+                        false,
+                        1,
+                        new OtherRevocationInfoFormat(CmsObjectIdentifiers.id_ri_ocsp_response, BasicOcspResponse.GetInstance(Asn1Object.FromByteArray(rawValue)))));
                 continue;
             }
 
             throw new InvalidOperationException($"Unsupported revocation source '{info.Source}' for CAdES Baseline-LT embedding.");
         }
 
-        return new RevocationValues(crls, ocspResponses, null);
+        var updatedSignedData = new Org.BouncyCastle.Asn1.Cms.SignedData(
+            signedData.DigestAlgorithms,
+            signedData.EncapContentInfo,
+            new DerSet(certificateEntries.Values.ToArray()),
+            revocationEntries.Count == 0 ? null : new DerSet(revocationEntries.Values.ToArray()),
+            signedData.SignerInfos);
+
+        return new Org.BouncyCastle.Asn1.Cms.ContentInfo(contentInfo.ContentType, updatedSignedData).GetEncoded();
     }
 
     private static EmbeddedValidationData ReadEmbeddedValidationData(ReadOnlyMemory<byte> signature, X509Certificate2? signingCertificate)
+    {
+        var modernValidationData = ReadSignedDataValidationData(signature, signingCertificate);
+        var legacyValidationData = ReadLegacyValidationData(signature, signingCertificate);
+
+        return MergeValidationData(modernValidationData, legacyValidationData);
+    }
+
+    private static EmbeddedValidationData ReadSignedDataValidationData(ReadOnlyMemory<byte> signature, X509Certificate2? signingCertificate)
+    {
+        var cms = new CmsSignedData(signature.ToArray());
+        var certificateValues = new List<ReadOnlyMemory<byte>>();
+        var revocationValues = new List<ReadOnlyMemory<byte>>();
+        var revocationInfo = new List<RevocationInfo>();
+
+        var signingCertificateThumbprint = signingCertificate?.Thumbprint;
+        foreach (var certificate in cms.GetCertificates().EnumerateMatches(null))
+        {
+            var rawValue = certificate.GetEncoded();
+            using var parsedCertificate = X509CertificateLoader.LoadCertificate(rawValue);
+            if (signingCertificateThumbprint is not null &&
+                StringComparer.OrdinalIgnoreCase.Equals(parsedCertificate.Thumbprint, signingCertificateThumbprint))
+            {
+                continue;
+            }
+
+            certificateValues.Add(rawValue);
+        }
+
+        var contentInfo = Org.BouncyCastle.Asn1.Cms.ContentInfo.GetInstance(Asn1Object.FromByteArray(signature.ToArray()));
+        var signedData = Org.BouncyCastle.Asn1.Cms.SignedData.GetInstance(contentInfo.Content);
+        foreach (var entry in EnumerateSet(signedData.CRLs))
+        {
+            var primitive = entry.ToAsn1Object();
+            if (primitive is Asn1Sequence)
+            {
+                var rawValue = primitive.GetEncoded();
+                revocationValues.Add(rawValue);
+                revocationInfo.Add(MapCrlRevocationInfo(rawValue, signingCertificate));
+                continue;
+            }
+
+            if (primitive is Asn1TaggedObject taggedObject && taggedObject.TagNo == 1)
+            {
+                var otherRevocationInfo = OtherRevocationInfoFormat.GetInstance(taggedObject, false);
+                var rawValue = otherRevocationInfo.Info.ToAsn1Object().GetEncoded();
+                revocationValues.Add(rawValue);
+                revocationInfo.Add(MapOcspRevocationInfo(rawValue));
+            }
+        }
+
+        return new EmbeddedValidationData(certificateValues, revocationInfo, revocationValues);
+    }
+
+    private static EmbeddedValidationData ReadLegacyValidationData(ReadOnlyMemory<byte> signature, X509Certificate2? signingCertificate)
     {
         var cms = new CmsSignedData(signature.ToArray());
         var signer = cms.GetSignerInfos().GetSigners().Cast<SignerInformation>().Single();
@@ -486,12 +579,20 @@ public sealed class CAdESBaselineBService
         return new EmbeddedValidationData(certificateValues, revocationInfo, revocationValues);
     }
 
+    private static EmbeddedValidationData MergeValidationData(EmbeddedValidationData primary, EmbeddedValidationData secondary)
+    {
+        var certificateValues = MergeDistinct(primary.CertificateValues, secondary.CertificateValues);
+        var revocationValues = MergeDistinct(primary.RevocationValues, secondary.RevocationValues);
+        var revocationInfo = MergeDistinctRevocationInfo(primary.RevocationInfo, secondary.RevocationInfo);
+
+        return new EmbeddedValidationData(certificateValues, revocationInfo, revocationValues);
+    }
+
     private static ValidationFailure? ValidateEmbeddedValidationData(ReadOnlyMemory<byte> signature, X509Certificate2? signingCertificate)
     {
-        EmbeddedValidationData validationData;
         try
         {
-            validationData = ReadEmbeddedValidationData(signature, signingCertificate);
+            _ = ReadEmbeddedValidationData(signature, signingCertificate);
         }
         catch (Exception ex) when (ex is CryptographicException or InvalidCastException or InvalidOperationException or ArgumentException)
         {
@@ -499,16 +600,6 @@ public sealed class CAdESBaselineBService
                 ValidationFailureKind.MalformedSignature,
                 ValidationErrorCodes.MalformedSignature,
                 $"Embedded CAdES-LT validation material could not be decoded: {ex.Message}");
-        }
-
-        var hasCertificateValues = validationData.CertificateValues.Count > 0;
-        var hasRevocationValues = validationData.RevocationValues.Count > 0;
-        if (hasCertificateValues != hasRevocationValues)
-        {
-            return new ValidationFailure(
-                ValidationFailureKind.MalformedSignature,
-                ValidationErrorCodes.MalformedSignature,
-                "CAdES embedded validation material must contain both CertificateValues and RevocationValues.");
         }
 
         return null;
@@ -596,7 +687,45 @@ public sealed class CAdESBaselineBService
                 }
 
                 var hashAlgorithm = GetDigestAlgorithmFromOid(archiveTimestamp.Token.TimeStampInfo.MessageImprintAlgOid);
-                var expectedDigest = ComputeArchiveTimestampDigest(
+                if (string.Equals(archiveTimestamp.AttributeOid, ArchiveTimeStampV3Oid, StringComparison.Ordinal))
+                {
+                    var actualAtsHashIndex = ReadAtsHashIndexAttribute(archiveTimestamp.Token);
+                    if (actualAtsHashIndex is null)
+                    {
+                        return new ValidationFailure(
+                            ValidationFailureKind.TimestampInvalid,
+                            ValidationErrorCodes.TimestampInvalid,
+                            "Archive timestamp token is missing ATSHashIndexV3.");
+                    }
+
+                    var expectedAtsHashIndex = BuildAtsHashIndexV3Attribute(signature, hashAlgorithm, archiveTimestamp.GeneratedAt);
+                    if (!GetSingleAttributeValueEncoding(actualAtsHashIndex).SequenceEqual(GetSingleAttributeValueEncoding(expectedAtsHashIndex)))
+                    {
+                        return new ValidationFailure(
+                            ValidationFailureKind.TimestampInvalid,
+                            ValidationErrorCodes.TimestampInvalid,
+                            "Archive timestamp token ATSHashIndexV3 does not match the signed data state.");
+                    }
+
+                    var expectedV3Digest = ComputeArchiveTimestampV3Digest(
+                        signature,
+                        detachedPayload,
+                        hashAlgorithm,
+                        archiveTimestamp.GeneratedAt,
+                        actualAtsHashIndex);
+
+                    if (!archiveTimestamp.Token.TimeStampInfo.GetMessageImprintDigest().SequenceEqual(expectedV3Digest))
+                    {
+                        return new ValidationFailure(
+                            ValidationFailureKind.TimestampInvalid,
+                            ValidationErrorCodes.TimestampInvalid,
+                            "Archive timestamp token message imprint verification failed.");
+                    }
+
+                    continue;
+                }
+
+                var expectedDigest = ComputeArchiveTimestampV2Digest(
                     signature,
                     detachedPayload,
                     hashAlgorithm,
@@ -605,7 +734,7 @@ public sealed class CAdESBaselineBService
 
                 if (!archiveTimestamp.Token.TimeStampInfo.GetMessageImprintDigest().SequenceEqual(expectedDigest))
                 {
-                    var compatibilityDigest = ComputeArchiveTimestampDigest(
+                    var compatibilityDigest = ComputeArchiveTimestampV2Digest(
                         signature,
                         detachedPayload,
                         hashAlgorithm,
@@ -656,18 +785,35 @@ public sealed class CAdESBaselineBService
         return null;
     }
 
-    private static byte[] ComputeArchiveTimestampDigest(
+    private static byte[] ComputeArchiveTimestampV2Digest(
         ReadOnlyMemory<byte> signature,
         ReadOnlyMemory<byte> detachedPayload,
         HashAlgorithmIdentifier hashAlgorithm,
         DateTimeOffset? referenceTimestamp,
         bool includeUnsignedAttrsTagAndLength)
     {
-        var imprintInput = BuildArchiveTimestampImprintInput(signature, detachedPayload, referenceTimestamp, includeUnsignedAttrsTagAndLength);
+        var imprintInput = BuildArchiveTimestampV2ImprintInput(signature, detachedPayload, referenceTimestamp, includeUnsignedAttrsTagAndLength);
         return HashData(imprintInput.Span, hashAlgorithm);
     }
 
-    private static ReadOnlyMemory<byte> BuildArchiveTimestampImprintInput(
+    private static byte[] ComputeArchiveTimestampV3Digest(
+        ReadOnlyMemory<byte> signature,
+        ReadOnlyMemory<byte> detachedPayload,
+        HashAlgorithmIdentifier hashAlgorithm,
+        DateTimeOffset? referenceTimestamp,
+        Org.BouncyCastle.Asn1.Cms.Attribute? atsHashIndexAttribute = null)
+    {
+        var imprintInput = BuildArchiveTimestampV3ImprintInput(
+            signature,
+            detachedPayload,
+            hashAlgorithm,
+            referenceTimestamp,
+            atsHashIndexAttribute ?? BuildAtsHashIndexV3Attribute(signature, hashAlgorithm, referenceTimestamp));
+
+        return HashData(imprintInput.Span, hashAlgorithm);
+    }
+
+    private static ReadOnlyMemory<byte> BuildArchiveTimestampV2ImprintInput(
         ReadOnlyMemory<byte> signature,
         ReadOnlyMemory<byte> detachedPayload,
         DateTimeOffset? referenceTimestamp,
@@ -719,6 +865,182 @@ public sealed class CAdESBaselineBService
         return buffer.ToArray();
     }
 
+    private static ReadOnlyMemory<byte> BuildArchiveTimestampV3ImprintInput(
+        ReadOnlyMemory<byte> signature,
+        ReadOnlyMemory<byte> detachedPayload,
+        HashAlgorithmIdentifier hashAlgorithm,
+        DateTimeOffset? referenceTimestamp,
+        Org.BouncyCastle.Asn1.Cms.Attribute atsHashIndexAttribute)
+    {
+        var cmsStructure = ReadCmsStructure(signature);
+        var signerInfoStructure = ReadSignerInfoStructure(cmsStructure.SignerInfo, referenceTimestamp, includeUnsignedAttrsTagAndLength: false);
+        using var buffer = new MemoryStream();
+
+        buffer.Write(ReadEncodedContentType(cmsStructure.EncapsulatedContentInfo));
+        buffer.Write(ComputeSignedDataDigest(signature, cmsStructure.IsDetached, detachedPayload, hashAlgorithm));
+        buffer.Write(signerInfoStructure.Version.Span);
+        buffer.Write(signerInfoStructure.SignerIdentifier.Span);
+        buffer.Write(signerInfoStructure.DigestAlgorithm.Span);
+
+        if (!signerInfoStructure.SignedAttributes.IsEmpty)
+        {
+            buffer.Write(signerInfoStructure.SignedAttributes.Span);
+        }
+
+        buffer.Write(signerInfoStructure.SignatureAlgorithm.Span);
+        buffer.Write(signerInfoStructure.SignatureValue.Span);
+        buffer.Write(GetSingleAttributeValueEncoding(atsHashIndexAttribute));
+        return buffer.ToArray();
+    }
+
+    private static byte[] ReadEncodedContentType(ReadOnlyMemory<byte> encapsulatedContentInfo)
+    {
+        var contentReader = new AsnReader(encapsulatedContentInfo, AsnEncodingRules.BER);
+        var contentSequence = contentReader.ReadSequence();
+        return contentSequence.ReadEncodedValue().ToArray();
+    }
+
+    private static byte[] ComputeSignedDataDigest(
+        ReadOnlyMemory<byte> signature,
+        bool isDetached,
+        ReadOnlyMemory<byte> detachedPayload,
+        HashAlgorithmIdentifier hashAlgorithm)
+    {
+        if (isDetached)
+        {
+            if (detachedPayload.IsEmpty)
+            {
+                throw new InvalidOperationException("Detached CAdES archive timestamp validation requires the original payload bytes.");
+            }
+
+            return HashData(detachedPayload.Span, hashAlgorithm);
+        }
+
+        var signedCms = Decode(signature);
+        return HashData(signedCms.ContentInfo.Content, hashAlgorithm);
+    }
+
+    private static Org.BouncyCastle.Asn1.Cms.Attribute BuildAtsHashIndexV3Attribute(
+        ReadOnlyMemory<byte> signature,
+        HashAlgorithmIdentifier hashAlgorithm,
+        DateTimeOffset? referenceTimestamp)
+    {
+        var cmsStructure = ReadCmsStructure(signature);
+        var certificateHashes = ReadTaggedEntries(cmsStructure.Certificates, new Asn1Tag(TagClass.ContextSpecific, 0))
+            .Select(entry => new DerOctetString(HashData(GetDerEncoded(entry), hashAlgorithm)))
+            .Cast<Asn1Encodable>()
+            .ToArray();
+
+        var crlHashes = ReadTaggedEntries(cmsStructure.Crls, new Asn1Tag(TagClass.ContextSpecific, 1))
+            .Select(entry => new DerOctetString(HashData(GetDerEncoded(entry), hashAlgorithm)))
+            .Cast<Asn1Encodable>()
+            .ToArray();
+
+        var unsignedAttributeHashes = ReadUnsignedAttributeHashEntries(cmsStructure.SignerInfo, hashAlgorithm, referenceTimestamp)
+            .Select(hash => new DerOctetString(hash))
+            .Cast<Asn1Encodable>()
+            .ToArray();
+
+        var value = new DerSequence(
+            new Org.BouncyCastle.Asn1.X509.AlgorithmIdentifier(new DerObjectIdentifier(GetDigestOid(hashAlgorithm))),
+            new DerSequence(certificateHashes),
+            new DerSequence(crlHashes),
+            new DerSequence(unsignedAttributeHashes));
+
+        return new Org.BouncyCastle.Asn1.Cms.Attribute(
+            new DerObjectIdentifier(AtsHashIndexV3Oid),
+            new DerSet(value));
+    }
+
+    private static IReadOnlyList<ReadOnlyMemory<byte>> ReadTaggedEntries(ReadOnlyMemory<byte> taggedSet, Asn1Tag expectedTag)
+    {
+        if (taggedSet.IsEmpty)
+        {
+            return Array.Empty<ReadOnlyMemory<byte>>();
+        }
+
+        var reader = new AsnReader(taggedSet, AsnEncodingRules.BER);
+        var set = reader.ReadSetOf(skipSortOrderValidation: true, expectedTag: expectedTag);
+        var values = new List<ReadOnlyMemory<byte>>();
+
+        while (set.HasData)
+        {
+            values.Add(set.ReadEncodedValue().ToArray());
+        }
+
+        return values;
+    }
+
+    private static IReadOnlyList<byte[]> ReadUnsignedAttributeHashEntries(
+        ReadOnlyMemory<byte> signerInfoEncoding,
+        HashAlgorithmIdentifier hashAlgorithm,
+        DateTimeOffset? referenceTimestamp)
+    {
+        var signerReader = new AsnReader(signerInfoEncoding, AsnEncodingRules.BER);
+        var signerSequence = signerReader.ReadSequence();
+        _ = signerSequence.ReadEncodedValue();
+        _ = signerSequence.ReadEncodedValue();
+        _ = signerSequence.ReadEncodedValue();
+
+        if (signerSequence.HasData && signerSequence.PeekTag().HasSameClassAndValue(new Asn1Tag(TagClass.ContextSpecific, 0)))
+        {
+            _ = signerSequence.ReadEncodedValue();
+        }
+
+        _ = signerSequence.ReadEncodedValue();
+        _ = signerSequence.ReadEncodedValue();
+
+        if (!signerSequence.HasData || !signerSequence.PeekTag().HasSameClassAndValue(new Asn1Tag(TagClass.ContextSpecific, 1)))
+        {
+            return Array.Empty<byte[]>();
+        }
+
+        var unsignedAttributeSet = signerSequence.ReadSetOf(true, new Asn1Tag(TagClass.ContextSpecific, 1));
+        var hashes = new List<byte[]>();
+
+        while (unsignedAttributeSet.HasData)
+        {
+            var attributeBytes = unsignedAttributeSet.ReadEncodedValue().ToArray();
+            if (ShouldExcludeArchiveTimestampAttribute(attributeBytes, referenceTimestamp))
+            {
+                continue;
+            }
+
+            var attribute = Org.BouncyCastle.Asn1.Cms.Attribute.GetInstance(Asn1Object.FromByteArray(attributeBytes));
+            var attributeTypeEncoding = attribute.AttrType.GetEncoded("DER");
+            foreach (Asn1Encodable attributeValue in attribute.AttrValues)
+            {
+                hashes.Add(HashData(Concat(attributeTypeEncoding, attributeValue.ToAsn1Object().GetEncoded("DER")), hashAlgorithm));
+            }
+        }
+
+        return hashes;
+    }
+
+    private static Org.BouncyCastle.Asn1.Cms.Attribute? ReadAtsHashIndexAttribute(TimeStampToken timestampToken)
+        => timestampToken.UnsignedAttributes?[new DerObjectIdentifier(AtsHashIndexV3Oid)];
+
+    private static byte[] GetSingleAttributeValueEncoding(Org.BouncyCastle.Asn1.Cms.Attribute attribute)
+    {
+        if (attribute.AttrValues.Count != 1)
+        {
+            throw new InvalidOperationException($"Attribute '{attribute.AttrType.Id}' must contain exactly one value.");
+        }
+
+        return attribute.AttrValues[0].ToAsn1Object().GetEncoded("DER");
+    }
+
+    private static byte[] GetDerEncoded(ReadOnlyMemory<byte> encoded)
+        => Asn1Object.FromByteArray(encoded.ToArray()).GetEncoded("DER");
+
+    private static byte[] Concat(ReadOnlySpan<byte> left, ReadOnlySpan<byte> right)
+    {
+        var buffer = new byte[left.Length + right.Length];
+        left.CopyTo(buffer);
+        right.CopyTo(buffer.AsSpan(left.Length));
+        return buffer;
+    }
+
     private static IReadOnlyList<ArchiveTimestampEntry> ReadArchiveTimestampEntries(ReadOnlyMemory<byte> signature)
     {
         var signerInfo = ReadCmsStructure(signature).SignerInfo;
@@ -766,7 +1088,8 @@ public sealed class CAdESBaselineBService
         var attributeReader = new AsnReader(attributeEncoding, AsnEncodingRules.BER);
         var attributeSequence = attributeReader.ReadSequence();
         var oid = attributeSequence.ReadObjectIdentifier();
-        if (!string.Equals(oid, ArchiveTimeStampV2Oid, StringComparison.Ordinal))
+        if (!string.Equals(oid, ArchiveTimeStampV2Oid, StringComparison.Ordinal) &&
+            !string.Equals(oid, ArchiveTimeStampV3Oid, StringComparison.Ordinal))
         {
             entry = null;
             return false;
@@ -787,7 +1110,8 @@ public sealed class CAdESBaselineBService
                 token.TimeStampInfo.Policy,
                 GetDigestFromOid(token.TimeStampInfo.MessageImprintAlgOid)),
             token,
-            new DateTimeOffset(token.TimeStampInfo.GenTime.ToUniversalTime()));
+            new DateTimeOffset(token.TimeStampInfo.GenTime.ToUniversalTime()),
+            oid);
         return true;
     }
 
@@ -1063,12 +1387,12 @@ public sealed class CAdESBaselineBService
         EmbeddedValidationData validationData,
         IReadOnlyList<TimestampMaterial> archiveTimestamps)
     {
-        if (archiveTimestamps.Count > 0 && timestamps.Count > 0 && validationData.CertificateValues.Count > 0 && validationData.RevocationValues.Count > 0)
+        if (archiveTimestamps.Count > 0 && timestamps.Count > 0 && validationData.RevocationValues.Count > 0)
         {
             return SignatureLevel.BaselineLTA;
         }
 
-        if (timestamps.Count > 0 && validationData.CertificateValues.Count > 0 && validationData.RevocationValues.Count > 0)
+        if (timestamps.Count > 0 && validationData.RevocationValues.Count > 0)
         {
             return SignatureLevel.BaselineLT;
         }
@@ -1129,6 +1453,69 @@ public sealed class CAdESBaselineBService
     private static bool IsCrlSource(string source) => source.Contains("CRL", StringComparison.OrdinalIgnoreCase);
     private static bool IsOcspSource(string source) => source.Contains("OCSP", StringComparison.OrdinalIgnoreCase);
 
+    private static Dictionary<string, Asn1Encodable> CreateDistinctAsn1EntryMap(Asn1Set? source)
+    {
+        var result = new Dictionary<string, Asn1Encodable>(StringComparer.Ordinal);
+        foreach (var entry in EnumerateSet(source))
+        {
+            AddDistinctAsn1Entry(result, entry);
+        }
+
+        return result;
+    }
+
+    private static void AddDistinctAsn1Entry(IDictionary<string, Asn1Encodable> target, Asn1Encodable entry)
+        => target[Convert.ToBase64String(entry.GetEncoded())] = entry;
+
+    private static IEnumerable<Asn1Encodable> EnumerateSet(Asn1Set? set)
+    {
+        if (set is null)
+        {
+            yield break;
+        }
+
+        for (var index = 0; index < set.Count; index++)
+        {
+            yield return set[index];
+        }
+    }
+
+    private static IReadOnlyList<ReadOnlyMemory<byte>> MergeDistinct(
+        IReadOnlyList<ReadOnlyMemory<byte>> first,
+        IReadOnlyList<ReadOnlyMemory<byte>> second)
+    {
+        var entries = new Dictionary<string, ReadOnlyMemory<byte>>(StringComparer.Ordinal);
+        foreach (var value in first)
+        {
+            entries[Convert.ToBase64String(value.ToArray())] = value;
+        }
+
+        foreach (var value in second)
+        {
+            entries[Convert.ToBase64String(value.ToArray())] = value;
+        }
+
+        return entries.Values.ToArray();
+    }
+
+    private static IReadOnlyList<RevocationInfo> MergeDistinctRevocationInfo(
+        IReadOnlyList<RevocationInfo> first,
+        IReadOnlyList<RevocationInfo> second)
+    {
+        var entries = new Dictionary<string, RevocationInfo>(StringComparer.Ordinal);
+        foreach (var value in first)
+        {
+            entries[Convert.ToBase64String(value.EncodedValue.ToArray())] = value;
+        }
+
+        foreach (var value in second)
+        {
+            entries[Convert.ToBase64String(value.EncodedValue.ToArray())] = value;
+        }
+
+        return entries.Values.ToArray();
+    }
+
     private sealed record CmsStructure(
         ReadOnlyMemory<byte> EncapsulatedContentInfo,
         ReadOnlyMemory<byte> Certificates,
@@ -1148,7 +1535,8 @@ public sealed class CAdESBaselineBService
     private sealed record ArchiveTimestampEntry(
         TimestampMaterial Timestamp,
         TimeStampToken Token,
-        DateTimeOffset GeneratedAt);
+        DateTimeOffset GeneratedAt,
+        string AttributeOid);
 
     private sealed record EmbeddedValidationData(
         IReadOnlyList<ReadOnlyMemory<byte>> CertificateValues,

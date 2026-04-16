@@ -1,7 +1,7 @@
 # DigitalSignature
 
 ![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet)
-![ETSI Checker](https://img.shields.io/badge/ETSI%20Checker-15%2F15%20PASS-2ea44f)
+![ETSI Checker](https://img.shields.io/badge/ETSI%20Checker-20%2F20%20PASS-2ea44f)
 ![Profiles](https://img.shields.io/badge/Profiles-B%20%7C%20T%20%7C%20LT-1f6feb)
 ![Formats](https://img.shields.io/badge/Formats-CAdES%20%7C%20XAdES%20%7C%20PAdES%20%7C%20JAdES%20%7C%20ASiC--S-6f42c1)
 
@@ -31,15 +31,15 @@ It is designed around a few practical goals:
 
 ## Validation status
 
-The current runtime artifact set passes both local verification and a fresh ETSI Conformance Checker sweep for all Baseline-B, Baseline-T, and Baseline-LT rows below. Baseline-LTA is now implemented locally across CAdES, XAdES, PAdES, JAdES, and ASiC-S. ETSI checker coverage is still the previously completed Baseline-B, Baseline-T, and Baseline-LT sweep.
+The current runtime artifact set passes both local verification and a fresh ETSI Conformance Checker sweep across all Baseline-B, Baseline-T, Baseline-LT, and Baseline-LTA rows below.
 
 | Format | Baseline-B | Baseline-T | Baseline-LT | Baseline-LTA | Local Validation | ETSI Checker | Notes |
 |---|---:|---:|---:|---:|---|---|---|
-| CAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT) | LTA uses embedded `archive-time-stamp-v2`; checker sweep is currently B/T/LT |
-| XAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT) | LTA uses `xades141:ArchiveTimeStamp` |
-| PAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT) | LTA uses PDF-level `DocTimeStamp` with `ETSI.RFC3161` |
-| ASiC-S | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT) | LTA carries embedded CAdES-LTA inside the container |
-| JAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT) | Primary artifact is JSON General Serialization; LTA uses `arcTst` |
+| CAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT/LTA) | LTA uses `archiveTimestampV3` with embedded `ATSHashIndexV3` |
+| XAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT/LTA) | LTA uses `xades141:ArchiveTimeStamp` |
+| PAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT/LTA) | LTA uses PDF-level `DocTimeStamp` with `ETSI.RFC3161` |
+| ASiC-S | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT/LTA) | LTA carries embedded CAdES-LTA inside the container |
+| JAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT/LTA) | Primary artifact is JSON General Serialization; LTA uses `arcTst` |
 
 ## Architecture overview
 
