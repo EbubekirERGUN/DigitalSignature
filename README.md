@@ -31,14 +31,14 @@ It is designed around a few practical goals:
 
 ## Validation status
 
-The current runtime artifact set passes both local verification and a fresh ETSI Conformance Checker sweep for all Baseline-B, Baseline-T, and Baseline-LT rows below. Baseline-LTA rollout has started, and the first local slice is CAdES-LTA with embedded `archive-time-stamp-v2` support.
+The current runtime artifact set passes both local verification and a fresh ETSI Conformance Checker sweep for all Baseline-B, Baseline-T, and Baseline-LT rows below. Baseline-LTA rollout has started, and the first local slices are CAdES-LTA plus ASiC-S-LTA built on embedded `archive-time-stamp-v2` support.
 
 | Format | Baseline-B | Baseline-T | Baseline-LT | Baseline-LTA | Local Validation | ETSI Checker | Notes |
 |---|---:|---:|---:|---:|---|---|---|
 | CAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT) | LTA uses embedded `archive-time-stamp-v2`; checker sweep is currently B/T/LT |
 | XAdES | Yes | Yes | Yes | Planned | Pass | Pass | XML signature generation and validation |
 | PAdES | Yes | Yes | Yes | Planned | Pass | Pass | LT includes PDF DSS and VRI embedding |
-| ASiC-S | Yes | Yes | Yes | Planned | Pass | Pass | Single-file container with embedded CAdES signature |
+| ASiC-S | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT) | LTA carries embedded CAdES-LTA inside the container |
 | JAdES | Yes | Yes | Yes | Planned | Pass | Pass | Primary artifact is JSON General Serialization |
 
 ## Architecture overview

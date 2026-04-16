@@ -132,6 +132,49 @@ public class ASiCSBaselineBServiceTests
     }
 
     [Fact]
+    public async Task AttachArchiveTimestamp_ShouldProduceBaselineLTAArtifact_WhenContainerHasBaselineLTSignature()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=ASiC Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=ASiC Test TSA");
+
+        var service = new DigitalSignature.ASiC.ASiCSBaselineBService();
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate, fixedTimestamp: DateTimeOffset.Parse("2026-04-16T00:50:00Z"));
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048, IsRecommended: true);
+        var payload = "Hello ASiC-LTA"u8.ToArray();
+        var baselineBRequest = new SignatureRequest(SignatureFormat.ASiC, SignatureLevel.BaselineB, payload, MimeType: "text/plain");
+
+        var signingTime = DateTimeOffset.Parse("2026-04-16T00:30:00Z");
+        var baselineBArtifact = service.CreateContainer(baselineBRequest, "document.txt", certificate, rsa, suite, signingTime);
+        var signatureTimestamp = await CreateTimestampForContainerSignatureAsync(baselineBArtifact.Container.Data, payload, timestampProvider);
+        var baselineLTArtifact = service.CreateContainer(
+            baselineBRequest with { Level = SignatureLevel.BaselineLT },
+            "document.txt",
+            certificate,
+            rsa,
+            suite,
+            signingTime,
+            signatureTimestamp,
+            [certificate, tsaCertificate],
+            [
+                CreateCrlRevocationInfo(certificate, rsa, DateTimeOffset.Parse("2026-04-16T00:35:00Z")),
+                CreateCrlRevocationInfo(tsaCertificate, tsaKey, DateTimeOffset.Parse("2026-04-16T00:36:00Z"))
+            ]);
+
+        var archiveTimestamp = await CreateArchiveTimestampForContainerAsync(service, baselineLTArtifact.Container.Data, suite.HashAlgorithm, timestampProvider);
+        var baselineLtaArtifact = service.AttachArchiveTimestamp(baselineLTArtifact, archiveTimestamp);
+
+        var verification = service.VerifyContainer(baselineLtaArtifact.Container.Data);
+
+        Assert.Equal(SignatureLevel.BaselineLTA, baselineLtaArtifact.Container.Level);
+        Assert.Equal(ValidationConclusion.Valid, verification.Validation.Conclusion);
+        Assert.NotNull(verification.Validation.Signature);
+        Assert.Equal(SignatureLevel.BaselineLTA, verification.Validation.Signature!.Level);
+        Assert.Single(verification.Validation.Signature.ValidationMaterial.ArchiveTimestamps);
+    }
+
+    [Fact]
     public void VerifyContainer_ShouldFail_WhenPayloadDoesNotMatchSignature()
     {
         using var rsa = RSA.Create(2048);
@@ -210,6 +253,20 @@ public class ASiCSBaselineBServiceTests
                 timestampRequest.RequestedPolicyId?.Value,
                 timestampRequest.GetNonce() is { } nonce ? Convert.ToHexString(nonce.Span) : null,
                 timestampRequest.RequestSignerCertificate));
+
+        Assert.True(response.IsSuccess);
+        Assert.NotNull(response.Timestamp);
+        return response.Timestamp!;
+    }
+
+    private static async Task<TimestampMaterial> CreateArchiveTimestampForContainerAsync(
+        DigitalSignature.ASiC.ASiCSBaselineBService service,
+        ReadOnlyMemory<byte> containerBytes,
+        HashAlgorithmIdentifier hashAlgorithm,
+        ITimestampProvider timestampProvider)
+    {
+        var response = await timestampProvider.GetTimestampAsync(
+            service.CreateArchiveTimestampRequest(containerBytes, hashAlgorithm));
 
         Assert.True(response.IsSuccess);
         Assert.NotNull(response.Timestamp);

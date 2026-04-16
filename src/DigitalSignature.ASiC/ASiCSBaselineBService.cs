@@ -17,6 +17,45 @@ public sealed class ASiCSBaselineBService
 
     private readonly CAdESBaselineBService _cadesService = new();
 
+    public TimestampRequest CreateArchiveTimestampRequest(
+        ReadOnlyMemory<byte> containerBytes,
+        HashAlgorithmIdentifier hashAlgorithm)
+    {
+        var inspection = GetValidInspection(containerBytes);
+        return _cadesService.CreateArchiveTimestampRequest(inspection.SignatureData!, hashAlgorithm, inspection.PayloadData!);
+    }
+
+    public ASiCSBaselineBArtifact AttachArchiveTimestamp(
+        ASiCSBaselineBArtifact artifact,
+        TimestampMaterial archiveTimestamp)
+    {
+        ArgumentNullException.ThrowIfNull(artifact);
+
+        var inspection = GetValidInspection(artifact.Container.Data);
+        var signatureDescriptor = _cadesService.ReadSignature(inspection.SignatureData!);
+        if (signatureDescriptor.Level < SignatureLevel.BaselineLT)
+        {
+            throw new InvalidOperationException("ASiC-S Baseline-LTA requires a container with an embedded CAdES Baseline-LT signature.");
+        }
+
+        var updatedSignature = _cadesService.AttachArchiveTimestamp(
+            new SignatureArtifact(SignatureFormat.CAdES, signatureDescriptor.Level, inspection.SignatureData!, "application/pkcs7-signature"),
+            archiveTimestamp);
+
+        var containerBytes = StoredZipContainerBuilder.Build(
+            [
+                new StoredZipEntry(MimeTypeEntryName, Encoding.UTF8.GetBytes(ContainerMediaType)),
+                new StoredZipEntry(inspection.PayloadEntryName!, inspection.PayloadData!),
+                new StoredZipEntry(inspection.SignatureEntryName ?? SignatureEntryName, updatedSignature.Data.ToArray())
+            ],
+            archiveTimestamp.CreatedAt);
+
+        return new ASiCSBaselineBArtifact(
+            new SignatureArtifact(SignatureFormat.ASiC, SignatureLevel.BaselineLTA, containerBytes, ContainerMediaType),
+            inspection.PayloadEntryName!,
+            inspection.SignatureEntryName ?? SignatureEntryName);
+    }
+
     public ASiCSBaselineBArtifact CreateContainer(
         SignatureRequest request,
         string payloadEntryName,
@@ -203,6 +242,18 @@ public sealed class ASiCSBaselineBService
         }
 
         return null;
+    }
+
+    private static ContainerInspection GetValidInspection(ReadOnlyMemory<byte> containerBytes)
+    {
+        var inspection = InspectContainer(containerBytes);
+        var structuralFailure = GetStructuralFailure(inspection);
+        if (structuralFailure is not null)
+        {
+            throw new InvalidOperationException(structuralFailure.Message);
+        }
+
+        return inspection;
     }
 
     private static ASiCSBaselineBVerificationResult Failure(string message, ValidationFailureKind kind, string code) =>

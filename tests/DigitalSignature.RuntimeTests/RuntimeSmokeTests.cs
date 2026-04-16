@@ -101,6 +101,44 @@ public class RuntimeSmokeTests
     }
 
     [Fact]
+    public async Task ASiC_RuntimeSmoke_ShouldCreateAndVerifyBaselineLTAContainer()
+    {
+        using var material = new RuntimeMaterial();
+        var service = new ASiCSBaselineBService();
+        var baselineBRequest = new SignatureRequest(SignatureFormat.ASiC, SignatureLevel.BaselineB, RuntimeSmokeFixtures.AsicPayload);
+
+        var signingTime = DateTimeOffset.Parse("2026-04-14T08:01:30Z");
+        var baselineBArtifact = service.CreateContainer(baselineBRequest, "runtime-lta.txt", material.Certificate, material.Key, material.Suite, signingTime);
+        var signatureTimestamp = await CreateTimestampForDetachedSignatureInsideContainerAsync(
+            baselineBArtifact.Container.Data,
+            baselineBRequest.Payload,
+            material.TimestampProvider);
+
+        var baselineLTArtifact = service.CreateContainer(
+            baselineBRequest with { Level = SignatureLevel.BaselineLT },
+            "runtime-lta.txt",
+            material.Certificate,
+            material.Key,
+            material.Suite,
+            signingTime,
+            signatureTimestamp,
+            [material.Certificate, material.TsaCertificate],
+            [
+                CreateCrlRevocationInfo(material.Certificate, material.Key, DateTimeOffset.Parse("2026-04-14T08:02:30Z")),
+                CreateCrlRevocationInfo(material.TsaCertificate, material.TsaKey, DateTimeOffset.Parse("2026-04-14T08:03:30Z"))
+            ]);
+
+        var archiveTimestamp = await CreateArchiveTimestampForContainerAsync(service, baselineLTArtifact.Container.Data, material.Suite.HashAlgorithm, material.TimestampProvider);
+        var baselineLtaArtifact = service.AttachArchiveTimestamp(baselineLTArtifact, archiveTimestamp);
+        var verification = service.VerifyContainer(baselineLtaArtifact.Container.Data);
+
+        Assert.Equal(ValidationConclusion.Valid, verification.Validation.Conclusion);
+        Assert.NotNull(verification.Validation.Signature);
+        Assert.Equal(SignatureLevel.BaselineLTA, verification.Validation.Signature!.Level);
+        Assert.Single(verification.Validation.Signature.ValidationMaterial.ArchiveTimestamps);
+    }
+
+    [Fact]
     public void CAdES_RuntimeSmoke_ShouldCreateAndVerifyDetachedSignature()
     {
         using var material = new RuntimeMaterial();
@@ -461,6 +499,20 @@ public class RuntimeSmokeTests
         var signedCms = new SignedCms(new ContentInfo(payload.ToArray()), detached: true);
         signedCms.Decode(signature.ToArray());
         return await CreateTimestampFromSignerInfoAsync(signedCms.SignerInfos[0], timestampProvider);
+    }
+
+    private static async Task<TimestampMaterial> CreateArchiveTimestampForContainerAsync(
+        ASiCSBaselineBService service,
+        ReadOnlyMemory<byte> containerBytes,
+        HashAlgorithmIdentifier hashAlgorithm,
+        ITimestampProvider timestampProvider)
+    {
+        var response = await timestampProvider.GetTimestampAsync(
+            service.CreateArchiveTimestampRequest(containerBytes, hashAlgorithm));
+
+        Assert.True(response.IsSuccess);
+        Assert.NotNull(response.Timestamp);
+        return response.Timestamp!;
     }
 
     private static async Task<TimestampMaterial> CreateTimestampFromSignerInfoAsync(
