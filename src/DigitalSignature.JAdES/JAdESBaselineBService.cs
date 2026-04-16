@@ -131,6 +131,74 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
         return RebuildJsonEnvelope(baselineTEnvelope, updatedEntry);
     }
 
+    public TimestampRequest CreateArchiveTimestampRequest(
+        JAdESJsonSignatureEnvelope envelope,
+        HashAlgorithmIdentifier hashAlgorithm,
+        string? policyOid = null,
+        string? nonceHex = null,
+        bool requestSignerCertificate = true)
+    {
+        ArgumentNullException.ThrowIfNull(envelope);
+        return CreateArchiveTimestampRequest(envelope.JsonDocument, hashAlgorithm, policyOid, nonceHex, requestSignerCertificate);
+    }
+
+    public TimestampRequest CreateArchiveTimestampRequest(
+        string jsonDocument,
+        HashAlgorithmIdentifier hashAlgorithm,
+        string? policyOid = null,
+        string? nonceHex = null,
+        bool requestSignerCertificate = true)
+    {
+        var serialization = ParseGeneralJsonSerialization(jsonDocument);
+        var signatureEntry = GetSingleSignatureEntry(serialization);
+        EnsureCanAttachArchiveTimestamp(jsonDocument);
+
+        return new TimestampRequest(
+            HashData(BuildArchiveTimestampImprintInput(serialization, signatureEntry), hashAlgorithm),
+            GetTimestampHashAlgorithmName(hashAlgorithm),
+            policyOid,
+            nonceHex,
+            requestSignerCertificate);
+    }
+
+    public JAdESJsonSignatureEnvelope AttachArchiveTimestamp(
+        JAdESJsonSignatureEnvelope baselineLTEnvelope,
+        TimestampMaterial archiveTimestamp)
+    {
+        ArgumentNullException.ThrowIfNull(baselineLTEnvelope);
+        ArgumentNullException.ThrowIfNull(archiveTimestamp);
+
+        if (archiveTimestamp.Token.IsEmpty)
+        {
+            throw new InvalidOperationException("Archive timestamp token cannot be empty.");
+        }
+
+        var serialization = ParseGeneralJsonSerialization(baselineLTEnvelope.JsonDocument);
+        var signatureEntry = GetSingleSignatureEntry(serialization);
+        EnsureCanAttachArchiveTimestamp(baselineLTEnvelope.JsonDocument);
+        var messageImprintInput = BuildArchiveTimestampImprintInput(serialization, signatureEntry);
+
+        if (!Rfc3161TimestampToken.TryDecode(archiveTimestamp.Token, out var timestampToken, out _))
+        {
+            throw new InvalidOperationException("Archive timestamp token must be a decodable RFC 3161 token.");
+        }
+
+        if (!timestampToken!.VerifySignatureForData(messageImprintInput, out _, null))
+        {
+            throw new InvalidOperationException("Archive timestamp token does not match the JAdES-LT covered bytes.");
+        }
+
+        var components = ReadEtsiUComponents(signatureEntry.HeaderJson).ToList();
+        components.Add(new EtsiUComponentJson("arcTst", BuildArchiveTimestampComponentJson(archiveTimestamp)));
+
+        var updatedEntry = signatureEntry with
+        {
+            HeaderJson = BuildUnprotectedHeaderJson(components)
+        };
+
+        return RebuildJsonEnvelope(baselineLTEnvelope, updatedEntry);
+    }
+
     public TimestampRequest CreateSignatureTimestampRequest(
         JAdESJsonSignatureEnvelope envelope,
         HashAlgorithmIdentifier hashAlgorithm,
@@ -186,12 +254,13 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
         using var signingCertificate = TryLoadSigningCertificateFromProtectedHeader(protectedHeaderDocument.RootElement);
 
         var timestamps = ReadSignatureTimestamps(signatureEntry.HeaderJson, signatureEntry.Signature);
+        var archiveTimestamps = ReadArchiveTimestamps(signatureEntry.HeaderJson);
         var embeddedValidationData = ReadEmbeddedValidationData(signatureEntry.HeaderJson, signingCertificate);
         var certificateReference = signingCertificate is null ? null : CreateCertificateReference(signingCertificate);
 
         return new SignatureDescriptor(
             SignatureFormat.JAdES,
-            DetermineLevel(timestamps, embeddedValidationData),
+            DetermineLevel(timestamps, embeddedValidationData, archiveTimestamps),
             certificateReference,
             TryGetSigningTime(protectedHeaderDocument.RootElement),
             new ValidationMaterial(
@@ -201,6 +270,7 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
                 timestamps,
                 Array.Empty<ReadOnlyMemory<byte>>())
             {
+                ArchiveTimestamps = archiveTimestamps,
                 CertificateValues = embeddedValidationData.CertificateValues,
                 RevocationValues = embeddedValidationData.RevocationValues
             },
@@ -284,6 +354,12 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
             if (embeddedValidationFailure is not null)
             {
                 return ValidationResult.Failure(embeddedValidationFailure);
+            }
+
+            var archiveTimestampFailure = ValidateArchiveTimestamps(serialization, signatureEntry);
+            if (archiveTimestampFailure is not null)
+            {
+                return ValidationResult.Failure(archiveTimestampFailure);
             }
 
             return ValidationResult.Success(ReadJsonSignature(jsonDocument));
@@ -455,6 +531,21 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
             }
         });
 
+    private static string BuildArchiveTimestampComponentJson(TimestampMaterial archiveTimestamp)
+        => JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["arcTst"] = new Dictionary<string, object?>
+            {
+                ["tstTokens"] = new[]
+                {
+                    new Dictionary<string, object?>
+                    {
+                        ["val"] = Convert.ToBase64String(archiveTimestamp.Token.ToArray())
+                    }
+                }
+            }
+        });
+
     private static string BuildCertificateValuesComponentJson(IReadOnlyList<X509Certificate2> validationCertificates)
         => JsonSerializer.Serialize(new Dictionary<string, object?>
         {
@@ -514,7 +605,9 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
     private static string BuildUnprotectedHeaderJson(IEnumerable<EtsiUComponentJson> components)
     {
         var encodedComponents = components
-            .Select(component => Base64UrlEncode(Encoding.UTF8.GetBytes(component.Json)))
+            .Select(component => component.IsBase64UrlEncoded
+                ? component.SerializedValue
+                : Base64UrlEncode(Encoding.UTF8.GetBytes(component.Json)))
             .ToArray();
 
         return JsonSerializer.Serialize(new Dictionary<string, object?>
@@ -647,6 +740,10 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
         var components = new List<EtsiUComponentJson>();
         foreach (var etsiUItem in etsiUElement.EnumerateArray())
         {
+            var isBase64UrlEncoded = etsiUItem.ValueKind == JsonValueKind.String;
+            var serializedValue = etsiUItem.ValueKind == JsonValueKind.String
+                ? etsiUItem.GetString()!
+                : etsiUItem.GetRawText();
             string rawJson = etsiUItem.ValueKind switch
             {
                 JsonValueKind.String => DecodeBase64UrlToUtf8(etsiUItem.GetString()!),
@@ -666,7 +763,7 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
                 throw new JsonException("Each JAdES etsiU component must contain exactly one top-level property.");
             }
 
-            components.Add(new EtsiUComponentJson(properties[0].Name, rawJson));
+            components.Add(new EtsiUComponentJson(properties[0].Name, rawJson, serializedValue, isBase64UrlEncoded));
         }
 
         return components;
@@ -720,6 +817,56 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
             timestamps.Add(new TimestampMaterial(
                 tokenBytes,
                 timestampToken.TokenInfo.Timestamp,
+                timestampToken.TokenInfo.PolicyId?.Value,
+                GetDigestFromOid(timestampToken.TokenInfo.HashAlgorithmId?.Value)));
+        }
+
+        return timestamps;
+    }
+
+    private static IReadOnlyList<TimestampMaterial> ReadArchiveTimestamps(string? headerJson)
+    {
+        var timestamps = new List<TimestampMaterial>();
+        foreach (var component in ReadEtsiUComponents(headerJson).Where(component => string.Equals(component.Name, "arcTst", StringComparison.Ordinal)))
+        {
+            using var componentDocument = JsonDocument.Parse(component.Json);
+            var arcTst = componentDocument.RootElement.GetProperty("arcTst");
+
+            if (arcTst.TryGetProperty("canonAlg", out var canonAlg) && canonAlg.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
+            {
+                throw new CryptographicException("JAdES arcTst canonicalization is not supported by the current implementation.");
+            }
+
+            var tstTokens = arcTst.GetProperty("tstTokens");
+            if (tstTokens.ValueKind != JsonValueKind.Array || tstTokens.GetArrayLength() != 1)
+            {
+                throw new CryptographicException("JAdES arcTst must contain exactly one timestamp token.");
+            }
+
+            var encodedToken = tstTokens[0].GetProperty("val").GetString();
+            if (string.IsNullOrWhiteSpace(encodedToken))
+            {
+                throw new CryptographicException("JAdES arcTst token is missing its base64 value.");
+            }
+
+            byte[] tokenBytes;
+            try
+            {
+                tokenBytes = Convert.FromBase64String(encodedToken);
+            }
+            catch (FormatException ex)
+            {
+                throw new CryptographicException("JAdES arcTst contains an invalid base64 RFC 3161 token.", ex);
+            }
+
+            if (!Rfc3161TimestampToken.TryDecode(tokenBytes, out var timestampToken, out _))
+            {
+                throw new CryptographicException("JAdES arcTst token could not be decoded as an RFC 3161 token.");
+            }
+
+            timestamps.Add(new TimestampMaterial(
+                tokenBytes,
+                timestampToken!.TokenInfo.Timestamp,
                 timestampToken.TokenInfo.PolicyId?.Value,
                 GetDigestFromOid(timestampToken.TokenInfo.HashAlgorithmId?.Value)));
         }
@@ -860,6 +1007,105 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
         }
 
         return null;
+    }
+
+    private static ValidationFailure? ValidateArchiveTimestamps(
+        JAdESGeneralJsonSerialization serialization,
+        JAdESJsonSignatureEntry signatureEntry)
+    {
+        try
+        {
+            var components = ReadEtsiUComponents(signatureEntry.HeaderJson);
+            for (var index = 0; index < components.Count; index++)
+            {
+                var component = components[index];
+                if (!string.Equals(component.Name, "arcTst", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                using var componentDocument = JsonDocument.Parse(component.Json);
+                var arcTst = componentDocument.RootElement.GetProperty("arcTst");
+                var encodedToken = arcTst.GetProperty("tstTokens")[0].GetProperty("val").GetString();
+                var tokenBytes = Convert.FromBase64String(encodedToken!);
+
+                if (!Rfc3161TimestampToken.TryDecode(tokenBytes, out var timestampToken, out _))
+                {
+                    throw new CryptographicException("JAdES arcTst token could not be decoded as an RFC 3161 token.");
+                }
+
+                var messageImprintInput = BuildArchiveTimestampImprintInput(serialization, signatureEntry, index);
+                if (!timestampToken!.VerifySignatureForData(messageImprintInput, out _, null))
+                {
+                    throw new CryptographicException("JAdES arcTst token verification failed for the covered JAdES serialization bytes.");
+                }
+            }
+
+            return null;
+        }
+        catch (Exception ex) when (ex is CryptographicException or FormatException or JsonException or ArgumentException)
+        {
+            return new ValidationFailure(
+                ValidationFailureKind.TimestampInvalid,
+                ValidationErrorCodes.TimestampInvalid,
+                $"JAdES ArchiveTimeStamp could not be validated: {ex.Message}");
+        }
+    }
+
+    private static byte[] BuildArchiveTimestampImprintInput(
+        JAdESGeneralJsonSerialization serialization,
+        JAdESJsonSignatureEntry signatureEntry,
+        int? stopBeforeComponentIndex = null)
+    {
+        using var stream = new MemoryStream();
+        WriteAscii(stream, serialization.Payload);
+        stream.WriteByte((byte)'.');
+        WriteAscii(stream, signatureEntry.Protected);
+        stream.WriteByte((byte)'.');
+        WriteAscii(stream, signatureEntry.Signature);
+        stream.WriteByte((byte)'.');
+
+        var components = ReadEtsiUComponents(signatureEntry.HeaderJson);
+        for (var index = 0; index < components.Count; index++)
+        {
+            if (stopBeforeComponentIndex.HasValue && index >= stopBeforeComponentIndex.Value)
+            {
+                break;
+            }
+
+            var component = components[index];
+            if (component.IsBase64UrlEncoded)
+            {
+                WriteAscii(stream, component.SerializedValue);
+            }
+            else
+            {
+                WriteUtf8(stream, component.SerializedValue);
+            }
+        }
+
+        return stream.ToArray();
+    }
+
+    private void EnsureCanAttachArchiveTimestamp(string jsonDocument)
+    {
+        var descriptor = ReadJsonSignature(jsonDocument);
+        if (descriptor.Level < SignatureLevel.BaselineLT)
+        {
+            throw new InvalidOperationException("JAdES Baseline-LTA embedding requires an existing Baseline-LT signature.");
+        }
+    }
+
+    private static void WriteAscii(Stream stream, string value)
+    {
+        var bytes = Encoding.ASCII.GetBytes(value);
+        stream.Write(bytes, 0, bytes.Length);
+    }
+
+    private static void WriteUtf8(Stream stream, string value)
+    {
+        var bytes = Encoding.UTF8.GetBytes(value);
+        stream.Write(bytes, 0, bytes.Length);
     }
 
     private static ValidationFailure? VerifySignatureValue(
@@ -1018,8 +1264,14 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
 
     private static SignatureLevel DetermineLevel(
         IReadOnlyList<TimestampMaterial> timestamps,
-        EmbeddedValidationData validationData)
+        EmbeddedValidationData validationData,
+        IReadOnlyList<TimestampMaterial> archiveTimestamps)
     {
+        if (timestamps.Count > 0 && validationData.CertificateValues.Count > 0 && validationData.RevocationValues.Count > 0 && archiveTimestamps.Count > 0)
+        {
+            return SignatureLevel.BaselineLTA;
+        }
+
         if (timestamps.Count > 0 && validationData.CertificateValues.Count > 0 && validationData.RevocationValues.Count > 0)
         {
             return SignatureLevel.BaselineLT;
@@ -1114,7 +1366,13 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
 
     private static string DecodeBase64UrlToUtf8(string value) => Encoding.UTF8.GetString(Base64UrlDecode(value));
 
-    private sealed record EtsiUComponentJson(string Name, string Json);
+    private sealed record EtsiUComponentJson(string Name, string Json, string SerializedValue, bool IsBase64UrlEncoded)
+    {
+        public EtsiUComponentJson(string Name, string Json)
+            : this(Name, Json, JAdESBaselineBService.Base64UrlEncode(Encoding.UTF8.GetBytes(Json)), true)
+        {
+        }
+    }
 
     private sealed record EmbeddedValidationData(
         IReadOnlyList<ReadOnlyMemory<byte>> CertificateValues,

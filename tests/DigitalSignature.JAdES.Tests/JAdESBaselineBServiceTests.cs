@@ -188,6 +188,46 @@ public class JAdESBaselineBServiceTests
     }
 
     [Fact]
+    public async Task AttachArchiveTimestamp_ShouldProduceBaselineLTAJsonSignature()
+    {
+        using var rsa = RSA.Create(2048);
+        using var certificate = CreateSelfSignedCertificate(rsa, "CN=JAdES Test Signer");
+        using var tsaKey = RSA.Create(2048);
+        using var tsaCertificate = CreateTsaCertificate(tsaKey, "CN=JAdES Test TSA");
+
+        var service = new JAdESBaselineBService(new Rfc8785JsonCanonicalizer());
+        var timestampProvider = new LocalRfc3161TimestampProvider(tsaCertificate);
+        var request = new SignatureRequest(
+            SignatureFormat.JAdES,
+            SignatureLevel.BaselineB,
+            Encoding.UTF8.GetBytes("{\"b\":2,\"a\":1}"),
+            MimeType: "application/json");
+        var suite = new SignatureSuite(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha256, 2048, IsRecommended: true);
+
+        var baselineBEnvelope = service.CreateDetachedJsonSignature(request, certificate, rsa, suite, DateTimeOffset.Parse("2026-04-13T12:30:00Z"));
+        var signatureTimestamp = await CreateSignatureTimestampAsync(service, baselineBEnvelope, timestampProvider, suite.HashAlgorithm);
+        var baselineTEnvelope = service.AttachSignatureTimestamp(baselineBEnvelope, signatureTimestamp);
+        var baselineLTEnvelope = service.AttachValidationMaterial(
+            baselineTEnvelope,
+            [certificate, tsaCertificate],
+            [
+                CreateCrlRevocationInfo(certificate, rsa, DateTimeOffset.Parse("2026-04-14T08:02:00Z")),
+                CreateCrlRevocationInfo(tsaCertificate, tsaKey, DateTimeOffset.Parse("2026-04-14T08:03:00Z"))
+            ]);
+        var archiveTimestamp = await CreateArchiveTimestampAsync(service, baselineLTEnvelope, timestampProvider, suite.HashAlgorithm);
+        var baselineLTAEnvelope = service.AttachArchiveTimestamp(baselineLTEnvelope, archiveTimestamp);
+
+        var descriptor = service.ReadJsonSignature(baselineLTAEnvelope.JsonDocument);
+        var validation = service.VerifyDetachedJsonSignature(request.Payload, baselineLTAEnvelope.JsonDocument, certificate);
+        var etsiUComponentNames = ReadEtsiUComponentNames(baselineLTAEnvelope.HeaderJson!);
+
+        Assert.Equal(ValidationConclusion.Valid, validation.Conclusion);
+        Assert.Equal(SignatureLevel.BaselineLTA, descriptor.Level);
+        Assert.Single(descriptor.ValidationMaterial.ArchiveTimestamps);
+        Assert.Equal(new[] { "sigTst", "xVals", "rVals", "arcTst" }, etsiUComponentNames);
+    }
+
+    [Fact]
     public void VerifyDetachedSignature_ShouldFail_WhenPayloadCanonicalizationDiffers()
     {
         using var rsa = RSA.Create(2048);
@@ -214,6 +254,19 @@ public class JAdESBaselineBServiceTests
         HashAlgorithmIdentifier hashAlgorithm)
     {
         var response = await timestampProvider.GetTimestampAsync(service.CreateSignatureTimestampRequest(envelope, hashAlgorithm));
+
+        Assert.True(response.IsSuccess);
+        Assert.NotNull(response.Timestamp);
+        return response.Timestamp!;
+    }
+
+    private static async Task<TimestampMaterial> CreateArchiveTimestampAsync(
+        JAdESBaselineBService service,
+        JAdESJsonSignatureEnvelope envelope,
+        ITimestampProvider timestampProvider,
+        HashAlgorithmIdentifier hashAlgorithm)
+    {
+        var response = await timestampProvider.GetTimestampAsync(service.CreateArchiveTimestampRequest(envelope, hashAlgorithm));
 
         Assert.True(response.IsSuccess);
         Assert.NotNull(response.Timestamp);

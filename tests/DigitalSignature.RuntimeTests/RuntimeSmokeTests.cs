@@ -425,6 +425,42 @@ public class RuntimeSmokeTests
     }
 
     [Fact]
+    public async Task JAdES_RuntimeSmoke_ShouldCreateAndVerifyBaselineLTAJsonSignature()
+    {
+        using var material = new RuntimeMaterial();
+        var service = new JAdESBaselineBService(new Rfc8785JsonCanonicalizer());
+        var request = new SignatureRequest(SignatureFormat.JAdES, SignatureLevel.BaselineB, RuntimeSmokeFixtures.JadesPayload);
+
+        var baselineBEnvelope = service.CreateDetachedJsonSignature(
+            request,
+            material.Certificate,
+            material.Key,
+            material.Suite,
+            DateTimeOffset.Parse("2026-04-14T08:15:00Z"));
+        var signatureTimestampResponse = await material.TimestampProvider.GetTimestampAsync(
+            service.CreateSignatureTimestampRequest(baselineBEnvelope, material.Suite.HashAlgorithm));
+        var baselineTEnvelope = service.AttachSignatureTimestamp(baselineBEnvelope, signatureTimestampResponse.Timestamp!);
+        var baselineLTEnvelope = service.AttachValidationMaterial(
+            baselineTEnvelope,
+            [material.Certificate, material.TsaCertificate],
+            [
+                CreateCrlRevocationInfo(material.Certificate, material.Key, DateTimeOffset.Parse("2026-04-14T08:16:00Z")),
+                CreateCrlRevocationInfo(material.TsaCertificate, material.TsaKey, DateTimeOffset.Parse("2026-04-14T08:17:00Z"))
+            ]);
+        var archiveTimestampResponse = await material.TimestampProvider.GetTimestampAsync(
+            service.CreateArchiveTimestampRequest(baselineLTEnvelope, material.Suite.HashAlgorithm));
+        var baselineLTAEnvelope = service.AttachArchiveTimestamp(baselineLTEnvelope, archiveTimestampResponse.Timestamp!);
+        var verification = service.VerifyDetachedJsonSignature(request.Payload, baselineLTAEnvelope.JsonDocument, material.Certificate);
+        var descriptor = service.ReadJsonSignature(baselineLTAEnvelope.JsonDocument);
+
+        Assert.True(signatureTimestampResponse.IsSuccess);
+        Assert.True(archiveTimestampResponse.IsSuccess);
+        Assert.Equal(ValidationConclusion.Valid, verification.Conclusion);
+        Assert.Equal(SignatureLevel.BaselineLTA, descriptor.Level);
+        Assert.Single(descriptor.ValidationMaterial.ArchiveTimestamps);
+    }
+
+    [Fact]
     public async Task PAdES_RuntimeSmoke_ShouldPrepareBindAndVerifyTimestampedSignatureContainer()
     {
         using var material = new RuntimeMaterial();

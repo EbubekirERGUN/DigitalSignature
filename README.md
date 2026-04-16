@@ -31,7 +31,7 @@ It is designed around a few practical goals:
 
 ## Validation status
 
-The current runtime artifact set passes both local verification and a fresh ETSI Conformance Checker sweep for all Baseline-B, Baseline-T, and Baseline-LT rows below. Baseline-LTA rollout is in progress, and the current local slices are CAdES-LTA, ASiC-S-LTA, PAdES-LTA, and XAdES-LTA.
+The current runtime artifact set passes both local verification and a fresh ETSI Conformance Checker sweep for all Baseline-B, Baseline-T, and Baseline-LT rows below. Baseline-LTA is now implemented locally across CAdES, XAdES, PAdES, JAdES, and ASiC-S. ETSI checker coverage is still the previously completed Baseline-B, Baseline-T, and Baseline-LT sweep.
 
 | Format | Baseline-B | Baseline-T | Baseline-LT | Baseline-LTA | Local Validation | ETSI Checker | Notes |
 |---|---:|---:|---:|---:|---|---|---|
@@ -39,7 +39,7 @@ The current runtime artifact set passes both local verification and a fresh ETSI
 | XAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT) | LTA uses `xades141:ArchiveTimeStamp` |
 | PAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT) | LTA uses PDF-level `DocTimeStamp` with `ETSI.RFC3161` |
 | ASiC-S | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT) | LTA carries embedded CAdES-LTA inside the container |
-| JAdES | Yes | Yes | Yes | Planned | Pass | Pass | Primary artifact is JSON General Serialization |
+| JAdES | Yes | Yes | Yes | Yes | Pass (B/T/LT/LTA) | Pass (B/T/LT) | Primary artifact is JSON General Serialization; LTA uses `arcTst` |
 
 ## Architecture overview
 
@@ -158,7 +158,7 @@ DigitalSignature currently targets:
 
 - local signing workflows based on `RSA` and `X509Certificate2`
 - Baseline-B, Baseline-T, and Baseline-LT artifact generation across all main families
-- early Baseline-LTA rollout, currently covering CAdES-LTA, ASiC-S-LTA, PAdES-LTA, and XAdES-LTA locally
+- local Baseline-LTA coverage across CAdES-LTA, ASiC-S-LTA, PAdES-LTA, XAdES-LTA, and JAdES-LTA
 - local verification and ETSI-oriented interoperability checks
 
 It is not yet positioned as a full production PKI platform for:
