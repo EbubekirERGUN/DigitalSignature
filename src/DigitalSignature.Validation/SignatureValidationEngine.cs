@@ -38,7 +38,7 @@ public sealed class SignatureValidationEngine(
                 input.Signature.SigningCertificate,
                 input.Signature.ValidationMaterial.CertificateChain.Skip(1).FirstOrDefault(),
                 input.TemporalContext,
-                cancellationToken);
+                cancellationToken).ConfigureAwait(false);
 
             revocationInfo = collectedEvidence
                 .Select(MapRevocationInfo)
@@ -54,7 +54,7 @@ public sealed class SignatureValidationEngine(
         var trustAnchors = await trustAnchorProvider.GetTrustAnchorsAsync(
             input.Signature.Format,
             input.TemporalContext,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
 
         if (trustAnchors.Count == 0)
         {
@@ -71,7 +71,7 @@ public sealed class SignatureValidationEngine(
             intermediateCertificates: input.Signature.ValidationMaterial.CertificateChain,
             trustAnchors: trustAnchors);
 
-        var chainResult = await certificateChainValidator.ValidateAsync(chainRequest, cancellationToken);
+        var chainResult = await certificateChainValidator.ValidateAsync(chainRequest, cancellationToken).ConfigureAwait(false);
         if (!chainResult.IsTrusted)
         {
             return ValidationResult.Failure(chainResult.Failures.ToArray());

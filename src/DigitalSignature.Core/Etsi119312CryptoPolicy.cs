@@ -18,11 +18,13 @@ public sealed class Etsi119312CryptoPolicy : ICryptoPolicy
         new(SignatureAlgorithmIdentifier.RsaPkcs1, HashAlgorithmIdentifier.Sha384, 3072, IsLegacy: true)
     ];
 
+    private static readonly SignatureSuite[] VerificationSuites = MergeVerificationSuites();
+
     public IReadOnlyList<SignatureSuite> GetSupportedSuites(CryptoPolicyMode mode, SignatureFormat format, SignatureLevel level)
     {
         return mode == CryptoPolicyMode.Signing
             ? SigningSuites
-            : MergeVerificationSuites();
+            : VerificationSuites;
     }
 
     public CryptoPolicyDecision Evaluate(
@@ -47,7 +49,7 @@ public sealed class Etsi119312CryptoPolicy : ICryptoPolicy
         return SigningSuites[0];
     }
 
-    private static IReadOnlyList<SignatureSuite> MergeVerificationSuites()
+    private static SignatureSuite[] MergeVerificationSuites()
     {
         var suites = new SignatureSuite[SigningSuites.Length + VerificationOnlySuites.Length];
         SigningSuites.CopyTo(suites, 0);

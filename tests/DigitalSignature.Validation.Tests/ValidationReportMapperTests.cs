@@ -1,3 +1,4 @@
+using System.Globalization;
 using DigitalSignature.Abstractions;
 using DigitalSignature.Validation.Reports;
 
@@ -13,7 +14,7 @@ public class ValidationReportMapperTests
             SignatureFormat.CAdES,
             SignatureLevel.BaselineB,
             signingCertificate,
-            DateTimeOffset.Parse("2026-04-13T09:00:00Z"),
+            DateTimeOffset.Parse("2026-04-13T09:00:00Z", CultureInfo.InvariantCulture),
             new ValidationMaterial(
                 signingCertificate,
                 [signingCertificate],
@@ -33,7 +34,7 @@ public class ValidationReportMapperTests
         Assert.Equal(1, report.Evidence.CertificateCount);
         Assert.Equal(1, report.Evidence.RevocationObjectCount);
         Assert.Equal(1, report.Evidence.TimestampCount);
-        Assert.Contains("Validation succeeded", report.Summary);
+        Assert.Contains("Validation succeeded", report.Summary, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -51,6 +52,6 @@ public class ValidationReportMapperTests
         Assert.False(report.Conclusion.IsSuccess);
         Assert.Single(report.Failures);
         Assert.Equal(ValidationErrorCodes.TrustAnchorMissing, report.Failures[0].Code);
-        Assert.Contains("Validation failed", report.Summary);
+        Assert.Contains("Validation failed", report.Summary, StringComparison.Ordinal);
     }
 }

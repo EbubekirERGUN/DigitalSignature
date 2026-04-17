@@ -25,8 +25,9 @@ public sealed class CAdESAugmenter : ISignatureAugmenter
 
         if (request.TargetLevel >= SignatureLevel.BaselineT)
         {
-            var timestamp = request.EffectiveTimestamps.FirstOrDefault()
-                ?? throw new InvalidOperationException("Baseline-T augmentation requires at least one timestamp token.");
+            var timestamp = request.EffectiveTimestamps.Count > 0
+                ? request.EffectiveTimestamps[0]
+                : throw new InvalidOperationException("Baseline-T augmentation requires at least one timestamp token.");
 
             if (!timestamps.Contains(timestamp))
             {
@@ -60,8 +61,9 @@ public sealed class CAdESAugmenter : ISignatureAugmenter
 
         if (request.TargetLevel >= SignatureLevel.BaselineLTA)
         {
-            var archiveTimestamp = request.EffectiveArchiveTimestamps.FirstOrDefault()
-                ?? throw new InvalidOperationException("Baseline-LTA augmentation requires at least one archive timestamp token.");
+            var archiveTimestamp = request.EffectiveArchiveTimestamps.Count > 0
+                ? request.EffectiveArchiveTimestamps[0]
+                : throw new InvalidOperationException("Baseline-LTA augmentation requires at least one archive timestamp token.");
 
             if (!archiveTimestamps.Contains(archiveTimestamp))
             {

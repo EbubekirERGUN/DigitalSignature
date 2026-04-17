@@ -21,6 +21,6 @@ public sealed class CAdESBaselineBValidator(
         }
 
         var input = SignatureValidationInput.Create(payload, integrityResult.Signature, integrityResult, temporalContext);
-        return await validationEngine.ValidateAsync(input, options, cancellationToken);
+        return await validationEngine.ValidateAsync(input, options, cancellationToken).ConfigureAwait(false);
     }
 }

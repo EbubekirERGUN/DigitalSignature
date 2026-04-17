@@ -17,7 +17,7 @@ public sealed class RevocationEvidenceCollector(
 
         if (ocspResponder is not null)
         {
-            var ocsp = await ocspResponder.GetRevocationEvidenceAsync(certificate, issuer, temporalContext, cancellationToken);
+            var ocsp = await ocspResponder.GetRevocationEvidenceAsync(certificate, issuer, temporalContext, cancellationToken).ConfigureAwait(false);
             if (ocsp is not null)
             {
                 evidence.Add(ocsp);
@@ -26,7 +26,7 @@ public sealed class RevocationEvidenceCollector(
 
         if (crlProvider is not null)
         {
-            var crlEvidence = await crlProvider.GetRevocationEvidenceAsync(certificate, issuer, temporalContext, cancellationToken);
+            var crlEvidence = await crlProvider.GetRevocationEvidenceAsync(certificate, issuer, temporalContext, cancellationToken).ConfigureAwait(false);
             if (crlEvidence.Count > 0)
             {
                 evidence.AddRange(crlEvidence);

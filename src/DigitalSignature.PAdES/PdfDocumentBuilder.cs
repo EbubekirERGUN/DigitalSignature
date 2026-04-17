@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 
 namespace DigitalSignature.PAdES;
@@ -20,7 +21,7 @@ internal sealed class PdfDocumentBuilder
             offsets[number] = Encoding.ASCII.GetByteCount(builder.ToString());
             builder.Append(number).AppendLine(" 0 obj");
             builder.Append(content);
-            if (!content.EndsWith("\n", StringComparison.Ordinal))
+            if (!content.EndsWith('\n'))
             {
                 builder.AppendLine();
             }
@@ -35,13 +36,13 @@ internal sealed class PdfDocumentBuilder
         for (var i = 1; i <= maxObjectNumber; i++)
         {
             offsets.TryGetValue(i, out var offset);
-            builder.Append(offset.ToString("D10")).AppendLine(" 00000 n ");
+            builder.Append(offset.ToString("D10", CultureInfo.InvariantCulture)).AppendLine(" 00000 n ");
         }
 
         builder.AppendLine("trailer");
         builder.Append("<< /Size ").Append(maxObjectNumber + 1).Append(" /Root ").Append(rootObjectNumber).AppendLine(" 0 R >>");
         builder.AppendLine("startxref");
-        builder.AppendLine(xrefOffset.ToString());
+        builder.AppendLine(xrefOffset.ToString(CultureInfo.InvariantCulture));
         builder.Append("%%EOF");
 
         return Encoding.ASCII.GetBytes(builder.ToString());

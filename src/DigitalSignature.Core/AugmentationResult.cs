@@ -8,6 +8,10 @@ public sealed record AugmentationResult(
     bool HasEmbeddedValidationData,
     bool HasArchiveEvidence)
 {
-    public static AugmentationResult Unchanged(SignatureDescriptor signature, SignatureLevel targetLevel) =>
-        new(signature, TimestampAttachmentPlan.Empty(signature.Format, signature.Level, targetLevel), false, false);
+    public static AugmentationResult Unchanged(SignatureDescriptor signature, SignatureLevel targetLevel)
+    {
+        ArgumentNullException.ThrowIfNull(signature);
+
+        return new(signature, TimestampAttachmentPlan.Empty(signature.Format, signature.Level, targetLevel), false, false);
+    }
 }

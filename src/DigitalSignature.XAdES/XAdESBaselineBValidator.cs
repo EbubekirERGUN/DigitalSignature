@@ -32,7 +32,7 @@ public sealed class XAdESBaselineBValidator(
             integrityResult,
             temporalContext);
 
-        var validation = await validationEngine.ValidateAsync(input, options, cancellationToken);
+        var validation = await validationEngine.ValidateAsync(input, options, cancellationToken).ConfigureAwait(false);
         return new XAdESVerificationResult(
             validation,
             metadata.HasSignedPropertiesReference,
@@ -60,7 +60,7 @@ public sealed class XAdESBaselineBValidator(
                 canonicalizationMethod is not null,
                 canonicalizationMethod?.GetAttribute("Algorithm"));
         }
-        catch
+        catch (Exception ex) when (ex is XmlException or ArgumentException)
         {
             return (false, false, null);
         }

@@ -112,6 +112,7 @@ public sealed class CAdESBaselineBService
         TimestampMaterial archiveTimestamp)
     {
         ArgumentNullException.ThrowIfNull(artifact);
+        ArgumentNullException.ThrowIfNull(archiveTimestamp);
 
         if (artifact.Format != SignatureFormat.CAdES)
         {
@@ -628,7 +629,7 @@ public sealed class CAdESBaselineBService
                         token.TimeStampInfo.Policy,
                         GetDigestFromOid(token.TimeStampInfo.MessageImprintAlgOid)));
                 }
-                catch
+                catch (Exception ex) when (ex is CmsException or TspException or IOException or InvalidOperationException)
                 {
                     // Ignore malformed timestamp attributes during read; verification will surface them.
                 }
@@ -1442,12 +1443,12 @@ public sealed class CAdESBaselineBService
         _ => oid
     };
 
-    private static HashAlgorithmIdentifier GetDigestAlgorithmFromOid(string? oid) => oid switch
+    private static HashAlgorithmIdentifier GetDigestAlgorithmFromOid(string oid) => oid switch
     {
         "2.16.840.1.101.3.4.2.1" => HashAlgorithmIdentifier.Sha256,
         "2.16.840.1.101.3.4.2.2" => HashAlgorithmIdentifier.Sha384,
         "2.16.840.1.101.3.4.2.3" => HashAlgorithmIdentifier.Sha512,
-        _ => throw new NotSupportedException($"Unsupported digest algorithm OID: {oid ?? "<null>"}.")
+        _ => throw new NotSupportedException($"Unsupported digest algorithm OID: {oid}.")
     };
 
     private static bool IsCrlSource(string source) => source.Contains("CRL", StringComparison.OrdinalIgnoreCase);

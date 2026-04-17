@@ -52,6 +52,8 @@ public sealed class PAdESBaselineBService
 
     public PdfDetachedSignatureInput PrepareDetachedSignatureInput(PdfSignatureBindingResult binding)
     {
+        ArgumentNullException.ThrowIfNull(binding);
+
         var renderedByteRange = PdfByteRangeFormatter.Format(binding.Placeholder.ByteRange).PadRight(ByteRangeToken.Length, ' ');
         var renderedText = Encoding.ASCII.GetString(binding.Document.Span).Replace(ByteRangeToken, renderedByteRange, StringComparison.Ordinal);
         var preparedDocument = Encoding.ASCII.GetBytes(renderedText);
@@ -183,6 +185,7 @@ public sealed class PAdESBaselineBService
         TimestampMaterial documentTimestamp)
     {
         ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(documentTimestamp);
 
         if (documentTimestamp.Token.IsEmpty)
         {
@@ -214,6 +217,8 @@ public sealed class PAdESBaselineBService
         PdfDetachedSignatureInput input,
         ReadOnlyMemory<byte> detachedCmsSignature)
     {
+        ArgumentNullException.ThrowIfNull(input);
+
         var document = input.Document.ToArray();
         var hexSignature = Convert.ToHexString(detachedCmsSignature.Span);
 
@@ -237,6 +242,8 @@ public sealed class PAdESBaselineBService
         IReadOnlyList<RevocationInfo> revocationInfo,
         IReadOnlyList<X509Certificate2>? validationCertificates = null)
     {
+        ArgumentNullException.ThrowIfNull(revocationInfo);
+
         var text = PdfDetachedSignatureLocator.Render(signedPdf);
         var placeholder = PdfDetachedSignatureLocator.TryLocatePlaceholder(text)
             ?? throw new InvalidOperationException("PDF signature placeholder was not found.");

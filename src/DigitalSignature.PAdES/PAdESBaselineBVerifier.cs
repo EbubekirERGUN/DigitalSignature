@@ -260,12 +260,12 @@ public sealed class PAdESBaselineBVerifier
         _ => throw new NotSupportedException($"Unsupported digest algorithm: {algorithm}.")
     };
 
-    private static HashAlgorithmIdentifier GetDigestAlgorithmFromOid(string? oid) => oid switch
+    private static HashAlgorithmIdentifier GetDigestAlgorithmFromOid(string oid) => oid switch
     {
         "2.16.840.1.101.3.4.2.1" => HashAlgorithmIdentifier.Sha256,
         "2.16.840.1.101.3.4.2.2" => HashAlgorithmIdentifier.Sha384,
         "2.16.840.1.101.3.4.2.3" => HashAlgorithmIdentifier.Sha512,
-        _ => throw new NotSupportedException($"Unsupported digest algorithm OID: {oid ?? "<null>"}.")
+        _ => throw new NotSupportedException($"Unsupported digest algorithm OID: {oid}.")
     };
 
     private static string? GetDigestFromOid(string? oid) => oid switch

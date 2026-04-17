@@ -17,6 +17,12 @@ namespace DigitalSignature.JAdES;
 
 public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
 {
+    private static readonly string[] SignatureTimeCriticalHeaders = ["sigT"];
+    private static readonly JsonSerializerOptions ProtectedHeaderJsonSerializerOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
     public JAdESSignatureEnvelope CreateDetachedSignature(
         SignatureRequest request,
         X509Certificate2 signingCertificate,
@@ -231,6 +237,8 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
 
     public SignatureDescriptor ReadSignature(string compactSerialization)
     {
+        ArgumentNullException.ThrowIfNull(compactSerialization);
+
         var envelope = ParseEnvelope(compactSerialization);
         using var protectedHeaderDocument = JsonDocument.Parse(DecodeBase64UrlToUtf8(envelope.ProtectedHeader));
         var protectedHeader = protectedHeaderDocument.RootElement;
@@ -283,6 +291,8 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
         string compactSerialization,
         X509Certificate2 signingCertificate)
     {
+        ArgumentNullException.ThrowIfNull(compactSerialization);
+
         try
         {
             var envelope = ParseEnvelope(compactSerialization);
@@ -475,13 +485,10 @@ public sealed class JAdESBaselineBService(IJsonCanonicalizer canonicalizer)
                 ["x5t#S256"] = Base64UrlEncode(SHA256.HashData(signingCertificate.RawData)),
                 ["x5c"] = new[] { Convert.ToBase64String(signingCertificate.RawData) },
                 ["typ"] = type,
-                ["sigT"] = signingTime.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
-                ["crit"] = new[] { "sigT" }
+                ["sigT"] = signingTime.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+                ["crit"] = SignatureTimeCriticalHeaders
             },
-            new JsonSerializerOptions
-            {
-                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-            });
+            ProtectedHeaderJsonSerializerOptions);
 
     private static string BuildGeneralJsonSerialization(JAdESGeneralJsonSerialization serialization)
     {

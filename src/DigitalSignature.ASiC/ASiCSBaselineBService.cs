@@ -31,6 +31,7 @@ public sealed class ASiCSBaselineBService
         TimestampMaterial archiveTimestamp)
     {
         ArgumentNullException.ThrowIfNull(artifact);
+        ArgumentNullException.ThrowIfNull(archiveTimestamp);
 
         var inspection = GetValidInspection(artifact.Container.Data);
         var preparedSignature = PrepareSignatureForArchiveTimestamp(inspection.SignatureData!, inspection.PayloadData!);
@@ -207,14 +208,14 @@ public sealed class ASiCSBaselineBService
         ArgumentException.ThrowIfNullOrWhiteSpace(payloadEntryName);
 
         var normalized = payloadEntryName.Replace('\\', '/');
-        if (normalized.StartsWith("/", StringComparison.Ordinal) ||
+        if (normalized.StartsWith('/') ||
             normalized.Contains("../", StringComparison.Ordinal) ||
             normalized.Contains("/..", StringComparison.Ordinal) ||
             normalized.Contains("//", StringComparison.Ordinal) ||
             normalized.Equals(MimeTypeEntryName, StringComparison.OrdinalIgnoreCase) ||
             normalized.StartsWith("META-INF/", StringComparison.OrdinalIgnoreCase) ||
-            normalized.EndsWith("/", StringComparison.Ordinal) ||
-            normalized.Contains("/", StringComparison.Ordinal))
+            normalized.EndsWith('/') ||
+            normalized.Contains('/', StringComparison.Ordinal))
         {
             throw new ArgumentException("ASiC-S payload entry must be a single root-level filename outside META-INF.", nameof(payloadEntryName));
         }

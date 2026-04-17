@@ -75,7 +75,9 @@ internal static class PdfDocumentSecurityStoreBuilder
             AddObject(ocspObjectNumbers[i], BuildAsciiHexStream(distinctOcsps[i]));
         }
 
+        #pragma warning disable CA5350 // PDF DSS VRI keys are conventionally derived from the signature-content SHA-1 digest.
         var vriKey = Convert.ToHexString(SHA1.HashData(signatureContentsBytes.Span));
+        #pragma warning restore CA5350
         AddObject(vriEntryObjectNumber, BuildVriEntry(certObjectNumbers, crlObjectNumbers, ocspObjectNumbers));
         AddObject(vriMapObjectNumber, $"<< /{vriKey} {vriEntryObjectNumber} 0 R >>");
         AddObject(dssObjectNumber, BuildDssDictionary(certObjectNumbers, crlObjectNumbers, ocspObjectNumbers, vriMapObjectNumber));

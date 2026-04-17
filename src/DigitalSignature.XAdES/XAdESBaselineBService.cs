@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using System.Security.Cryptography.Pkcs;
@@ -1302,7 +1303,9 @@ public sealed class XAdESBaselineBService(IXmlCanonicalizer canonicalizer)
     };
 
     private static string NormalizeSerialNumber(string serialNumber)
-        => string.IsNullOrWhiteSpace(serialNumber) ? string.Empty : System.Numerics.BigInteger.Parse($"00{serialNumber}", System.Globalization.NumberStyles.HexNumber).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        => string.IsNullOrWhiteSpace(serialNumber)
+            ? string.Empty
+            : System.Numerics.BigInteger.Parse($"00{serialNumber}", NumberStyles.HexNumber, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture);
 
     private static string ExtractIssuerName(string? issuerSerialV2)
     {

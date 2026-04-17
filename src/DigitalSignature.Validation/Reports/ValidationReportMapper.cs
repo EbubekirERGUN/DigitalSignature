@@ -43,7 +43,7 @@ public static class ValidationReportMapper
         return result.Conclusion switch
         {
             ValidationConclusion.Valid => new ValidationReportConclusion("TOTAL_PASSED", true),
-            ValidationConclusion.Invalid => new ValidationReportConclusion("TOTAL_FAILED", false, result.Failures.FirstOrDefault()?.Code),
+            ValidationConclusion.Invalid => new ValidationReportConclusion("TOTAL_FAILED", false, result.Failures.Count > 0 ? result.Failures[0].Code : null),
             _ => new ValidationReportConclusion("INDETERMINATE", false)
         };
     }

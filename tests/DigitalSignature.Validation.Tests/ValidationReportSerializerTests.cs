@@ -16,7 +16,7 @@ public class ValidationReportSerializerTests
 
         var json = ValidationReportSerializer.ToJson(report);
 
-        Assert.Contains("TOTAL_FAILED", json);
+        Assert.Contains("TOTAL_FAILED", json, StringComparison.Ordinal);
         Assert.Contains("timestamp_invalid", json, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("summary", json, StringComparison.OrdinalIgnoreCase);
     }

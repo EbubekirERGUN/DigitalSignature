@@ -4,7 +4,7 @@ namespace DigitalSignature.Core;
 
 public sealed class SignatureAugmentationEngine(IEnumerable<ISignatureAugmenter> augmenters)
 {
-    private readonly IReadOnlyDictionary<SignatureFormat, ISignatureAugmenter> _augmenters = augmenters.ToDictionary(augmenter => augmenter.Profile.Format);
+    private readonly Dictionary<SignatureFormat, ISignatureAugmenter> _augmenters = augmenters.ToDictionary(augmenter => augmenter.Profile.Format);
 
     public ValueTask<AugmentationResult> AugmentAsync(
         AugmentationRequest request,

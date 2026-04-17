@@ -18,6 +18,8 @@ public sealed class JAdESBaselineBValidator(
         SignatureValidationOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(compactSerialization);
+
         var integrityResult = jadesService.VerifyDetachedSignature(payload, compactSerialization, signingCertificate);
         var metadata = ReadCompactMetadata(compactSerialization);
 
@@ -32,7 +34,7 @@ public sealed class JAdESBaselineBValidator(
 
         var enrichedSignature = EnrichSignatureWithSigningCertificate(integrityResult.Signature, signingCertificate);
         var input = SignatureValidationInput.Create(payload, enrichedSignature, ValidationResult.Success(enrichedSignature), temporalContext);
-        var validation = await validationEngine.ValidateAsync(input, options, cancellationToken);
+        var validation = await validationEngine.ValidateAsync(input, options, cancellationToken).ConfigureAwait(false);
 
         return new JAdESVerificationResult(
             validation,
@@ -49,6 +51,8 @@ public sealed class JAdESBaselineBValidator(
         SignatureValidationOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(jsonSerialization);
+
         var integrityResult = jadesService.VerifyDetachedJsonSignature(payload, jsonSerialization, signingCertificate);
         var metadata = ReadJsonMetadata(jsonSerialization);
 
@@ -63,7 +67,7 @@ public sealed class JAdESBaselineBValidator(
 
         var enrichedSignature = EnrichSignatureWithSigningCertificate(integrityResult.Signature, signingCertificate);
         var input = SignatureValidationInput.Create(payload, enrichedSignature, ValidationResult.Success(enrichedSignature), temporalContext);
-        var validation = await validationEngine.ValidateAsync(input, options, cancellationToken);
+        var validation = await validationEngine.ValidateAsync(input, options, cancellationToken).ConfigureAwait(false);
 
         return new JAdESVerificationResult(
             validation,
@@ -110,7 +114,7 @@ public sealed class JAdESBaselineBValidator(
             using var headerDocument = JsonDocument.Parse(DecodeBase64UrlToUtf8(headerSegment));
             return ReadMetadata(headerDocument.RootElement);
         }
-        catch
+        catch (Exception ex) when (ex is JsonException or FormatException or ArgumentException or InvalidOperationException)
         {
             return (false, false, null);
         }
@@ -129,7 +133,7 @@ public sealed class JAdESBaselineBValidator(
             using var headerDocument = JsonDocument.Parse(DecodeBase64UrlToUtf8(protectedHeader));
             return ReadMetadata(headerDocument.RootElement);
         }
-        catch
+        catch (Exception ex) when (ex is JsonException or FormatException or ArgumentException or InvalidOperationException)
         {
             return (false, false, null);
         }

@@ -8,6 +8,9 @@ public static class TimestampMaterialEvaluator
         IReadOnlyList<TimestampMaterial> timestamps,
         TimestampValidationOptions options)
     {
+        ArgumentNullException.ThrowIfNull(timestamps);
+        ArgumentNullException.ThrowIfNull(options);
+
         if (timestamps.Count == 0)
         {
             return options.RequireTimestamp
