@@ -2,7 +2,22 @@
   <PropertyGroup>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <LangVersion>preview</LangVersion>
-    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <LangVersion>latestMajor</LangVersion>
+
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest-all</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+
+    <RunAnalyzersDuringBuild>true</RunAnalyzersDuringBuild>
+    <RunAnalyzersDuringLiveAnalysis>true</RunAnalyzersDuringLiveAnalysis>
+
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <WarningsNotAsErrors>CS1591</WarningsNotAsErrors>
   </PropertyGroup>
 </Project>
