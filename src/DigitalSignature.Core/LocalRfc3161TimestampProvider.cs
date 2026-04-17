@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using DigitalSignature.Abstractions;
+using Org.BouncyCastle.Asn1;
 using Org.BouncyCastle.Math;
 using Org.BouncyCastle.Security;
 using Org.BouncyCastle.Tsp;
@@ -40,7 +41,7 @@ public sealed class LocalRfc3161TimestampProvider(
 
             var requestGenerator = new TimeStampRequestGenerator();
             requestGenerator.SetCertReq(request.RequireCertificate);
-            requestGenerator.SetReqPolicy(tsaPolicyOid);
+            requestGenerator.SetReqPolicy(new DerObjectIdentifier(tsaPolicyOid));
 
             var timeStampRequest = nonce is null
                 ? requestGenerator.Generate(hashAlgorithmOid.Value!, request.HashedMessage.ToArray())

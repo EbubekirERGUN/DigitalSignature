@@ -949,7 +949,7 @@ public sealed class CAdESBaselineBService
 
         return new Org.BouncyCastle.Asn1.Cms.Attribute(
             new DerObjectIdentifier(AtsHashIndexV3Oid),
-            new DerSet(value));
+            new DerSet(new Asn1Encodable[] { value }));
     }
 
     private static IReadOnlyList<ReadOnlyMemory<byte>> ReadTaggedEntries(ReadOnlyMemory<byte> taggedSet, Asn1Tag expectedTag)
